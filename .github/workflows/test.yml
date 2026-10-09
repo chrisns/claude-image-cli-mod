@@ -1,0 +1,48 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python helper (${{ matrix.os }}, ${{ matrix.decoder }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        decoder: [pillow, imagemagick]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Pillow
+        if: matrix.decoder == 'pillow'
+        run: python -m pip install Pillow
+      - name: Install ImageMagick
+        if: matrix.decoder == 'imagemagick'
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install imagemagick; else sudo apt-get update && sudo apt-get install -y imagemagick; fi
+      - name: Test
+        run: python -m unittest discover -s mod/tests -p 'test_*.py' -v
+
+  mod:
+    name: Mod (validate and test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code@2.1.295
+      - name: Validate
+        run: claude plugin validate .
+      - name: Test
+        run: claude plugin test mod

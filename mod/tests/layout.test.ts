@@ -67,6 +67,15 @@ describe('fit', () => {
     expect(box.columns).toBe(20)
   })
 
+  test('a picture with no size still gets a whole box', () => {
+    for (const pixels of [{ width: 0, height: 0 }, { width: Number.NaN, height: 10 }, { width: 10, height: Infinity }]) {
+      const box = fit(pixels, auto, limits)
+
+      expect(Number.isInteger(box.columns) && box.columns >= 1).toBe(true)
+      expect(Number.isInteger(box.rows) && box.rows >= 1).toBe(true)
+    }
+  })
+
   test('always at least one cell', () => {
     expect(fit({ width: 4000, height: 1 }, auto, limits).rows).toBe(1)
   })

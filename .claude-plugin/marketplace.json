@@ -1,13 +1,14 @@
 {
   "name": "claude-image-cli-mod",
   "owner": {
-    "name": "Chris Nesbitt-Smith"
+    "name": "Chris Nesbitt-Smith",
+    "url": "https://github.com/chrisns"
   },
   "plugins": [
     {
       "name": "inline-images",
       "source": "./mod",
-      "description": "Preview the images that a command prints with the iTerm2 inline images protocol (imgcat and friends) in the Claude Code transcript."
+      "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), and the images Claude sends you, in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else."
     }
   ],
   "description": "A Claude Code mod that previews inline images from imgcat and similar tools."

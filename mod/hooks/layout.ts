@@ -52,10 +52,12 @@ export function fit(
   const widest = Math.max(1, Math.min(room, limits.maxColumns))
   const tallest = Math.max(1, limits.maxRows)
 
-  const { cell } = limits
+  const cell = limits.cell.width > 0 && limits.cell.height > 0 ? limits.cell : DEFAULT_CELL
 
-  // Rows per column for this image, once the cell shape is allowed for.
-  const ratio = (pixels.height / pixels.width) * (cell.width / cell.height)
+  // Rows per column for this image, once the cell shape is allowed for. A size
+  // that makes no sense (zero, NaN) draws a square rather than nothing.
+  const shape = (pixels.height / pixels.width) * (cell.width / cell.height)
+  const ratio = Number.isFinite(shape) && shape > 0 ? shape : cell.width / cell.height
 
   const wantedColumns = toCells(request.width, room, cell.width)
   const wantedRows = toCells(request.height, tallest, cell.height)
@@ -82,7 +84,7 @@ export function fit(
     rows = wantedRows
     columns = rows / ratio
   } else {
-    columns = pixels.width / cell.width
+    columns = Number.isFinite(pixels.width) && pixels.width > 0 ? pixels.width / cell.width : widest
     rows = columns * ratio
   }
 
@@ -97,8 +99,10 @@ export function fit(
     rows = tallest
   }
 
+  const whole = (value: number, high: number) => (Number.isFinite(value) ? clamp(Math.round(value), 1, high) : high)
+
   return {
-    columns: clamp(Math.round(columns), 1, widest),
-    rows: clamp(Math.round(rows), 1, tallest),
+    columns: whole(columns, widest),
+    rows: whole(rows, tallest),
   }
 }

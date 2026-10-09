@@ -1,137 +1,193 @@
 # inline-images
 
-inline-images is a Claude Code mod. It shows the images that a command prints with the [iTerm2 inline images protocol](https://iterm2.com/documentation-images.html).
+**See the pictures in your Claude Code transcript.**
 
-Tools such as `imgcat`, `it2cat`, `chafa -f iterm`, `timg -piterm` and `wezterm imgcat` print an image as an escape sequence. Claude Code does not draw it. Without this mod, you see "Ran 1 shell command" and the model reads a wall of base64.
+[![test](https://github.com/chrisns/claude-image-cli-mod/actions/workflows/test.yml/badge.svg)](https://github.com/chrisns/claude-image-cli-mod/actions/workflows/test.yml)
+[![MIT licence](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
+inline-images is a mod for [Claude Code](https://claude.com/claude-code). Many command-line tools print images with the [iTerm2 inline images protocol](https://iterm2.com/documentation-images.html): `imgcat`, `it2cat`, `chafa -f iterm`, `timg -p iterm`, `wezterm imgcat`, matplotlib backends and more. Claude Code does not show these images. You see "Ran 1 shell command", and the model reads a wall of base64.
+
+This mod shows each image under the tool call that printed it. It also shows the images that Claude sends to you.
 
 | Without the mod | With the mod |
 |---|---|
-| ![Claude Code shows only "Ran 1 shell command"](docs/screenshots/without-mod.png) | ![Claude Code shows the photo under the Bash call](docs/screenshots/with-mod.png) |
+| ![Claude Code shows only "Ran 1 shell command"](docs/screenshots/without-mod.png) | ![Claude Code shows the photo of the Earth under the Bash call](docs/screenshots/with-mod.png) |
 
-The picture above is a NASA photo of the Earth. It is a real iTerm2 inline image, at full resolution, inside a running Claude Code session.
+The picture on the right is a real iTerm2 image, at full resolution, inside a running Claude Code session.
 
-## What it does
+## Contents
 
-- It draws each image under the tool call that printed it.
-- It draws image files that Claude delivers to you with `SendUserFile` or `SendUserMessage`.
-- Click a picture to open it in your system's own viewer, for example Preview on macOS. Where the terminal sends no clicks to Claude Code, Cmd+click the caption: it is a `file://` link.
-- It opens the "Ran 1 shell command" group when the group holds an image.
-- It removes the base64 from what the model reads. A 1 MB image is about 1.3 million characters.
-- It reads output that Claude Code cut at 30,000 characters, so large images work.
-- It keeps the shape of the picture. It measures your terminal cell and fits the picture to it.
-- It supports transparency, several images in one command, and the `width`, `height` and `preserveAspectRatio` arguments.
+- [Quick start](#quick-start)
+- [Features](#features)
+- [Terminals](#terminals)
+- [Options](#options)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [FAQ](#faq)
+- [Uninstall](#uninstall)
+- [Develop](#develop)
 
-![One command that prints two images](docs/screenshots/gallery.png)
+## Quick start
 
-The first image above is a PNG with a transparent background. Its `-W 24` argument sets the width. The second image has `-W 56`.
+1. Install the mod. Type this in a Claude Code session:
 
-## Install
+   ```
+   /plugin install inline-images --marketplace chrisns/claude-image-cli-mod
+   ```
 
-Type this in a Claude Code session:
+   Answer `y` to add the marketplace. Then choose a scope.
 
-```
-/plugin install inline-images --marketplace chrisns/claude-image-cli-mod
-```
+2. Install Pillow, the image library that the mod uses:
 
-Answer `y` to add the marketplace. Then choose a scope.
+   ```
+   python3 -m pip install Pillow
+   ```
 
-To try it from a clone of this repository:
+3. For real pixels in iTerm2, do two more steps:
 
-```
-claude --plugin-dir ./mod
-```
+   - Run `python3 -m pip install iterm2`.
+   - In iTerm2, open **Settings > General > Magic** and select **Enable Python API**.
 
-### Requirements
+4. Test it. Ask Claude:
 
-- macOS or Linux.
-- Python 3.
-- [Pillow](https://pypi.org/project/pillow/). Run `python3 -m pip install Pillow`.
+   > Download https://raw.githubusercontent.com/chrisns/claude-image-cli-mod/main/docs/fixtures/earth.jpg and show it with imgcat.
 
-ImageMagick (`magick`) works in place of Pillow. It also reads formats that Pillow cannot, for example HEIC when ImageMagick has the delegate.
+   If you do not have `imgcat`, this command prints the same sequence:
 
-For real pixels in iTerm2, do two more things:
+   ```
+   printf '\033]1337;File=inline=1:%s\a\n' "$(base64 < earth.jpg | tr -d '\n')"
+   ```
 
-1. Run `python3 -m pip install iterm2`.
-2. In iTerm2, open Settings > General > Magic and select "Enable Python API".
+   You see the Earth under the Bash call, with a caption such as `earth.jpg · 800×800 · JPEG · 141.6 KB`.
 
-Without them, iTerm2 shows block previews, and a toast says why.
+## Features
 
-## Renderers
+- **Previews in the transcript.** Each image appears under the tool call that printed it, with its name, size and format.
+- **Real pixels.** iTerm2, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
+- **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery.
+- **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
+- **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, shown to the user]`, not 190,000 characters of base64.
+- **Large images.** Claude Code cuts tool output at 30,000 characters. The mod reads the whole output from the file where Claude Code saves it.
+- **The right shape.** The mod measures your terminal's cell size and keeps the picture's aspect ratio.
+- **The whole protocol.** `File=`, chunked `MultipartFile`, the tmux passthrough wrapper, the `BEL` and `ST` terminators, `width`, `height` and `preserveAspectRatio`. A download (`inline=0`) is not shown, and its note says so.
+- **Transparency** and several images in one command.
 
-The `renderer` option chooses how a picture is drawn.
+![One command that prints a PNG with a transparent background and a gradient](docs/screenshots/gallery.png)
 
-| Value | What it does |
-|---|---|
-| `auto` | Use `iterm` in iTerm2, `image` in kitty and Ghostty, and `cells` everywhere else. This is the default. |
-| `iterm` | Draw real pixels in iTerm2 with the iTerm2 inline images protocol. See [Real pixels in iTerm2](#real-pixels-in-iterm2). |
-| `image` | Draw real pixels with the kitty graphics protocol, through Claude Code's own `Image` element. Only kitty and Ghostty draw it. |
-| `cells` | Draw coloured block characters. Each cell holds 2 by 2 pixels. This works in every terminal. |
+## Terminals
 
-This is the same photo in Ghostty with `image`:
+| Terminal | What you see | How |
+|---|---|---|
+| iTerm2 | Real pixels | The [iTerm2 overlay](#real-pixels-in-iterm2). It needs the `iterm2` Python module and the Python API. |
+| iTerm2 without the Python API | Coloured blocks | The `cells` renderer. |
+| kitty, Ghostty | Real pixels | Claude Code's own `Image` element, which uses the kitty graphics protocol. |
+| Any other terminal | Coloured blocks | The `cells` renderer. Each cell holds 2 by 2 blocks of colour. |
 
-![The photo in Ghostty, drawn with real pixels](docs/screenshots/with-mod-ghostty.png)
+This is the same photo in Ghostty:
 
-This is the `cells` preview. iTerm2 falls back to it when the Python API is off:
+![The photo of the Earth in Ghostty, drawn with real pixels](docs/screenshots/with-mod-ghostty.png)
 
-![The photo drawn with coloured block characters](docs/screenshots/with-mod-cells.png)
+This is the block preview that other terminals show:
+
+![The photo of the Earth drawn with coloured block characters](docs/screenshots/with-mod-cells.png)
+
+## Options
+
+Change the options in the config menu of Claude Code, or under `pluginConfigs` in your settings.
+
+| Option | Default | What it does |
+|---|---|---|
+| `renderer` | `auto` | `auto` uses `iterm` in iTerm2, `image` in kitty and Ghostty, and `cells` in other terminals. You can also set `iterm`, `image` or `cells`. |
+| `max_columns` | `100` | The widest that a preview can be, from 1 to 255 columns. A preview is never wider than the transcript. |
+| `max_rows` | `28` | The tallest that a preview can be, from 1 to 255 rows. |
+| `palette` | `0` | Reduce a block preview to this many colours, from 0 to 256. `0` keeps all colours. A value near `32` can look cleaner on a busy picture. |
+| `hide_from_model` | `true` | Replace the image data in the tool result with a short note. |
+| `python` | `python3` | The Python 3 that runs the helper and the iTerm2 overlay. |
+
+## How it works
+
+1. A `ui.render` hook looks for `ESC ] 1337 ; File=` in the output of each tool call.
+2. [`mod/hooks/osc1337.ts`](mod/hooks/osc1337.ts) reads the sequences.
+3. [`mod/bin/render.py`](mod/bin/render.py) decodes the image and scales it to fit a box of cells. It reads the cell size from the terminal with `TIOCGWINSZ`.
+4. The mod draws the box with the renderer that your terminal supports.
+5. A transparent click layer ([`mod/hooks/click.tsx`](mod/hooks/click.tsx)) lies over each picture. A click opens the picture.
+6. A `session.append` hook removes the image data from what the model reads. The transcript keeps the whole output, so the preview comes back when you resume a session.
 
 ### Real pixels in iTerm2
 
 Claude Code owns the screen, so a mod cannot print an escape sequence. Claude Code's `Image` element uses kitty Unicode placeholders, and iTerm2 does not draw those. So the `iterm` renderer works beside Claude Code:
 
-1. The mod draws the `cells` preview. The first 5 cells of each row hold a marker in braille glyphs, in the colour of the cell. The marker carries the box's id and the row's number.
-2. `mod/bin/iterm_overlay.py` starts with the session. It watches the screen through the iTerm2 Python API.
-3. When it finds a box, it injects the real image over it with the iTerm2 protocol, as if the program had printed it there. It saves the cursor before and restores it after.
+1. The mod draws the block preview. The first 5 cells of each row hold a hidden marker: braille glyphs in the colour of the cell. The marker carries the box's id and the row number.
+2. [`mod/bin/iterm_overlay.py`](mod/bin/iterm_overlay.py) starts with the session. It watches the screen through the iTerm2 Python API.
+3. When it finds a box, it writes the real image over it with the iTerm2 protocol. It saves the cursor before and restores it after.
 
-Claude Code repaints only the cells that it thinks have changed. The overlay keeps the screen right with these rules:
+<details>
+<summary>How the overlay keeps the screen correct</summary>
 
-- Each marker glyph mixes in the row number. When a box moves, every marker cell changes, so Claude Code repaints it and the overlay finds the box in its new place.
-- A box must stand still for one look, and the overlay reads the screen again just before it draws.
-- It draws only rows that show the box and nothing else. So the image never hides a hint or a menu that Claude Code draws over the transcript.
-- If Claude Code repaints part of an image and the box has not moved, the overlay draws the image again.
-- A box cut by the edge of the screen gets a cropped image.
-- A large image goes as a chunked `MultipartFile` in one write, because iTerm2 prints one `File=` sequence of about 1 MB as text.
+Claude Code repaints only the cells that it thinks have changed. An image that is in the wrong place stays there. These rules prevent that:
 
-I tested this in iTerm2 3.7.2 with Claude Code 2.1.295, in the fullscreen layout. The tests covered scrolling with Page Up and Page Down, a resize, several images in one command, a 3000 by 3002 JPEG, the legacy `File=` form and the tmux wrapper.
+- Each marker glyph includes the row number. When a box moves, every marker cell changes. Claude Code repaints them, and the overlay finds the box in its new place.
+- A box must stay in one place for one look. The overlay reads the screen again just before it draws.
+- The overlay draws only rows that show the box and nothing else. So an image never hides a hint or a menu that Claude Code draws over the transcript.
+- If Claude Code repaints part of an image in place, the overlay draws the image again.
+- A box that the edge of the screen cuts gets a cropped image.
+- A large image goes as a chunked `MultipartFile` in one write. iTerm2 prints a single `File=` sequence of about 1 MB as text.
 
-## Options
+</details>
 
-Change them in the config menu of Claude Code, or under `pluginConfigs` in your settings.
+## Troubleshooting
 
-| Option | Default | What it does |
-|---|---|---|
-| `renderer` | `auto` | `auto`, `iterm`, `image` or `cells`. |
-| `max_columns` | `100` | The widest a preview can be. |
-| `max_rows` | `28` | The tallest a preview can be. |
-| `palette` | `0` | Reduce a `cells` preview to this many colours. `0` keeps all colours. Claude Code paints about 1024 different colour pairs at once. A value near `32` can look cleaner on a busy picture. |
-| `hide_from_model` | `true` | Replace the image data in the tool result with a one-line note. |
-| `python` | `python3` | The Python 3 command that runs `mod/bin/render.py` and `mod/bin/iterm_overlay.py`. |
+**No preview, and the raw output shows.** The mod is not loaded. Run `/plugin` and check that `inline-images` is enabled.
 
-## How it works
+**A dim line says `no preview: …`.** The helper could not draw the image. The text after `no preview:` gives the reason:
 
-1. A `ui.render` hook for `ToolResult`, `ToolUse` and `ToolGroup` finds `ESC ] 1337 ;` in the output of a tool.
-2. `mod/hooks/osc1337.ts` reads the sequences: `File=`, the chunked `MultipartFile`, `FilePart` and `FileEnd` that `imgcat` 3 uses, both terminators (`BEL` and `ESC \`), and the tmux passthrough wrapper.
-3. If Claude Code saved a large output to a file, `mod/bin/render.py scan` reads the file. The sandbox of a mod can read at most 4 MiB.
-4. `mod/bin/render.py` decodes the image, scales it to the box and builds the cells. It picks the best of 8 quadrant glyphs for each cell. It finds the real cell size with `TIOCGWINSZ` on the terminal of the parent process.
-5. A transparent `Client` region (`mod/hooks/click.tsx`) lies over each picture. A left click inside it asks the hooks module to run `open` (or `xdg-open`) on that file. The mod opens only files that it drew. An image from `imgcat` opens from the cache, under the name that `imgcat` sent.
-6. In iTerm2, `mod/bin/iterm_overlay.py` draws the real image over the preview. See [Real pixels in iTerm2](#real-pixels-in-iterm2).
-7. A `session.append` hook removes the data from the tool result that the model reads. The transcript keeps the whole output, so the preview comes back after a resume.
+- `no image decoder`: install Pillow, or set the `python` option to a Python that has it.
+- `not a supported image format`: the mod draws only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO.
+- `the image is too large`: the image has more than 40 million pixels, which is too many to decode safely.
 
-Decoded images are cached in a private folder under your temp directory. The mod removes files after 24 hours.
+**iTerm2 shows blocks, not real pixels.**
 
-## Limits
+1. Check that `python3 -c "import iterm2"` works in the Python that the `python` option names.
+2. Check that iTerm2 > Settings > General > Magic > **Enable Python API** is on.
+3. Start a new Claude Code session.
 
-- A GIF shows its first frame.
-- The preview is a still picture. It does not move.
-- A cell preview has about 4 by 8 pixels in each cell. It is a preview, not a viewer.
-- The model cannot see the image. It reads a note such as `[inline image: earth.jpg, 141.6 KB, shown to the user]`. To let the model look at a picture, ask it to read the file.
-- `image` shows a blank box when the terminal is on another machine, for example over ssh. The terminal must be able to read the file.
-- The `iterm` overlay needs the iTerm2 Python API on the machine where iTerm2 runs. Over ssh you get block previews.
-- In iTerm2, a row that Claude Code covers with a hint stays a block preview until the hint goes.
-- The overlay draws only boxes on the visible screen. iTerm2's own scrollback shows what was drawn there before.
-- A click on a picture needs Claude Code to receive mouse clicks, as it does in its fullscreen layout. Elsewhere, Cmd+click the caption.
+To see why the overlay is off, set the `renderer` option to `iterm`. A message then tells you the reason.
+
+**The picture tears while you scroll.** In iTerm2, the overlay draws again when the screen stops moving. A picture can look broken for a moment during a fast scroll.
+
+**Over ssh.** Real pixels need the mod and the terminal on the same machine. Over ssh you see the block preview.
+
+## FAQ
+
+**Can Claude see the images?** No. The model reads a short note. To let Claude look at a picture, ask it to read the image file.
+
+**Why not sixel?** Claude Code draws its screen itself. A mod can give it only text, cells and kitty images. The iTerm2 overlay is the one way to draw pixels beside it.
+
+**Where does the mod keep the images?** In your user cache folder: `~/Library/Caches/inline-images` on macOS, or `~/.cache/inline-images` on Linux. Only your user can read the folder. The mod deletes files that are older than 24 hours.
+
+**Does it send anything over the network?** No.
+
+**Is it safe to show an image from an unknown source?** The mod treats all tool output as untrusted. Read [SECURITY.md](SECURITY.md) for what it does.
+
+**Why braille glyphs in the iTerm2 marker?** No prompt, reply or diff uses them, and each glyph is one cell wide.
+
+## Uninstall
+
+```
+/plugin uninstall inline-images
+```
+
+To remove the marketplace too, run `/plugin marketplace remove claude-image-cli-mod`. To remove the cache, delete `~/Library/Caches/inline-images` on macOS, or `~/.cache/inline-images` on Linux.
 
 ## Develop
+
+Run the mod from a clone:
+
+```
+claude --plugin-dir ./mod
+```
+
+Run the checks:
 
 ```
 claude plugin validate .
@@ -139,11 +195,15 @@ claude plugin test mod
 python3 -m unittest discover -s mod/tests -p 'test_*.py'
 ```
 
-To type-check, start a session with the mod once so that Claude Code writes the types. Then run `npx -p typescript tsc -p mod`.
+The [CI workflow](.github/workflows/test.yml) runs the same checks on Linux and macOS, with Pillow and with ImageMagick.
 
-### Make the screenshots again
+To type-check, start one session with the mod, so that Claude Code writes the types into `mod/.claude-plugin/types`. Then run `npx -p typescript tsc -p mod`.
 
-The scripts in `scripts/` drive iTerm2 and Ghostty on macOS. They start a session with Haiku, send a prompt and save the window. The screenshot needs the Screen Recording permission.
+To see each draw of the iTerm2 overlay, start `claude` with `INLINE_IMAGES_DEBUG=/tmp/overlay.log`.
+
+### Screenshots
+
+The scripts in [`scripts/`](scripts) drive iTerm2 and Ghostty on macOS. They start a session with Haiku, send a prompt and save the window. Your terminal needs the Screen Recording permission.
 
 ```
 scripts/screenshot.sh docs/screenshots/raw-with.png with 'Use the Bash tool to run ~/.iterm2/imgcat docs/fixtures/earth.jpg. Do not read the file yourself. Reply with the single word: done.'
@@ -152,11 +212,11 @@ python3 scripts/crop-screenshot.py docs/screenshots/raw-with.png docs/screenshot
 
 `crop-screenshot.py` removes the input box and the status lines.
 
-Set `INLINE_IMAGES_DEBUG=/tmp/overlay.log` before you start `claude` to see each draw of the iTerm2 overlay.
-
 ## Credits
 
-The Earth photo in `docs/fixtures/earth.jpg` is [The Earth seen from Apollo 17](https://commons.wikimedia.org/wiki/File:The_Earth_seen_from_Apollo_17.jpg). NASA made it. It is in the public domain.
+- `docs/fixtures/earth.jpg` is [The Earth seen from Apollo 17](https://commons.wikimedia.org/wiki/File:The_Earth_seen_from_Apollo_17.jpg), a NASA photo in the public domain.
+- `docs/fixtures/earth-cutout.png` is the same photo with a transparent background.
+- `docs/fixtures/gradient.png` was made for this project. It is under the MIT licence.
 
 ## Licence
 

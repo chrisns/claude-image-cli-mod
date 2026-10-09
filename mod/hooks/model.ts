@@ -4,7 +4,8 @@ type Block = { type: string; [field: string]: unknown }
 
 /** Cut every inline image out of one string; the same string comes back when there is none. */
 export function strip(text: string): string {
-  return extract(text, image => describe(image).replace(/]$/, ', shown to the user]'), SHOWN_CUT).text
+  // A download (inline=0) is never drawn: its note says so, and is left as it is.
+  return extract(text, image => (image.isInline ? describe(image).replace(/]$/, ', shown to the user]') : describe(image)), SHOWN_CUT).text
 }
 
 /** The note for image data that a size limit cut off: the mod read it whole and showed it. */

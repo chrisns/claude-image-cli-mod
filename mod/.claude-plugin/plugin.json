@@ -1,11 +1,25 @@
 {
   "name": "inline-images",
-  "version": "0.2.0",
-  "description": "Shows the images that a command prints with the iTerm2 inline images protocol (imgcat and friends) as a preview in the Claude Code transcript, and keeps their base64 out of the model's context.",
+  "version": "0.3.0",
+  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), and the images Claude sends you, in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
-    "name": "Chris Nesbitt-Smith"
+    "name": "Chris Nesbitt-Smith",
+    "url": "https://github.com/chrisns"
   },
+  "homepage": "https://github.com/chrisns/claude-image-cli-mod",
+  "repository": "https://github.com/chrisns/claude-image-cli-mod",
   "license": "MIT",
+  "keywords": [
+    "images",
+    "imgcat",
+    "iterm2",
+    "inline-images",
+    "osc-1337",
+    "kitty",
+    "ghostty",
+    "terminal",
+    "preview"
+  ],
   "userConfig": {
     "renderer": {
       "title": "Renderer",

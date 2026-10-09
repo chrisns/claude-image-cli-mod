@@ -2,15 +2,14 @@ import type { ClientModule } from 'claude-code'
 
 // A click layer over a preview. It draws nothing, so the picture under it
 // shows, and it tells the hooks module when the left button goes down and up
-// inside it: the hooks module then opens the file in the system's own viewer.
+// inside it. The hooks module knows which file this layer stands for (by the
+// drawing and this layer's key) and opens it in the system's own viewer: the
+// message carries no path, so nothing here can choose what is opened.
 
-type Props = { path: string }
-type State = { latest: Props }
+type State = { isListening: true }
 
-const Click: ClientModule<Props, State> = (props, surface) => {
+const Click: ClientModule<null, State> = (_props, surface) => {
   if (surface.state === undefined) {
-    // One listener for the life of the instance; it reads the props it was last given.
-    const latest = { ...props }
     let isDown = false
 
     surface.onPointer(event => {
@@ -20,7 +19,7 @@ const Click: ClientModule<Props, State> = (props, surface) => {
         isDown = event.button === 'left' && isInside
       } else if (event.type === 'up') {
         if (isDown && isInside) {
-          surface.post({ open: latest.path })
+          surface.post({ open: true })
         }
 
         isDown = false
@@ -28,9 +27,7 @@ const Click: ClientModule<Props, State> = (props, surface) => {
         isDown = false
       }
     })
-    surface.setState({ latest })
-  } else {
-    surface.state.latest.path = props.path
+    surface.setState({ isListening: true })
   }
 
   return surface.elements.Box({ width: surface.columns, height: surface.rows })

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { extract, parseDimension, unwrapTmux } from '../hooks/osc1337.ts'
+import { cleanName, extract, hasImageSequence, parseDimension, unwrapTmux } from '../hooks/osc1337.ts'
 import { stripBlocks } from '../hooks/model.ts'
 
 const ESC = '\u001b'
@@ -158,5 +158,63 @@ describe('stripBlocks', () => {
     const content = result('plain output')
 
     expect(stripBlocks(content)).toBe(content)
+  })
+})
+
+describe('untrusted input', () => {
+  test('an unterminated tmux passthrough with many ESC pairs is scanned in linear time', () => {
+    const hostile = `${ESC}Ptmux;${`${ESC}${ESC}Ptmux;`.repeat(40_000)}`
+    const started = Date.now()
+
+    expect(unwrapTmux(hostile)).toBe(hostile)
+    expect(Date.now() - started).toBeLessThan(500)
+  })
+
+  test('a large tmux passthrough unwraps', () => {
+    const inner = whole('inline=1')
+    const big = `${ESC}Ptmux;${inner.split(ESC).join(`${ESC}${ESC}`)}${'x'.repeat(3_000_000)}${ST}`
+
+    expect(unwrapTmux(big).startsWith(inner)).toBe(true)
+  })
+
+  test('a name loses control and format characters, and its length', () => {
+    expect(cleanName(`a${ESC}]52;c;evil${BEL}\nb`)).toBe('a]52;c;evilb')
+    expect(cleanName('right\u202Eto-left.png')).toBe('rightto-left.png')
+    expect(cleanName('x'.repeat(500))).toHaveLength(120)
+  })
+
+  test('a name with an escape sequence reaches no caption or note', () => {
+    const evil = btoa(`photo${ESC}]52;c;Zm9v${BEL}.png`)
+    const { images, text } = extract(whole(`inline=1;name=${evil}`))
+
+    expect(images[0]?.name).toBe('photo]52;c;Zm9v.png')
+    expect(text).not.toContain(ESC)
+  })
+
+  test('an absurd size is no size', () => {
+    expect(parseDimension('9'.repeat(400))).toEqual({ unit: 'auto' })
+    expect(parseDimension('100001')).toEqual({ unit: 'auto' })
+  })
+
+  test('text printed between the chunks of an image is kept', () => {
+    const half = Math.floor(PNG.length / 2)
+    const chunked =
+      `a${ESC}]1337;MultipartFile=inline=1${BEL}${ESC}]1337;FilePart=${PNG.slice(0, half)}${BEL}` +
+      `50%${ESC}]1337;FilePart=${PNG.slice(half)}${BEL}100%${ESC}]1337;FileEnd${BEL}b`
+
+    expect(extract(chunked, () => '<img>').text).toBe('a<img>50%100%b')
+  })
+
+  test('only File and MultipartFile start an image', () => {
+    expect(hasImageSequence(whole('inline=1'))).toBe(true)
+    expect(hasImageSequence(`${ESC}]1337;MultipartFile=inline=1${BEL}`)).toBe(true)
+    expect(hasImageSequence(`${ESC}]1337;CurrentDir=/tmp${BEL}`)).toBe(false)
+    expect(hasImageSequence('grep 1337 osc1337.ts')).toBe(false)
+  })
+
+  test('a download is described as one', () => {
+    const [block] = stripBlocks([{ type: 'tool_result', tool_use_id: 't', content: whole(`inline=0;name=${NAME}`) }])
+
+    expect(block?.content).toBe('[file download: tiny.png, 70 B, not shown]')
   })
 })

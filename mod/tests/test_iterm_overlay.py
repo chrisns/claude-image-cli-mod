@@ -3,10 +3,18 @@
 Run with: python3 -m unittest discover -s mod/tests -p 'test_*.py'
 """
 
+import asyncio
+import base64
 import importlib.util
+import io
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 BIN = os.path.join(os.path.dirname(__file__), "..", "bin")
 sys.path.insert(0, BIN)
@@ -72,9 +80,15 @@ class Overlays:
         self.rows_ = [box_row(row, width, 0, fill)[:width] for row in range(rows)]
 
     def glyph(self, marker, row, column):
-        if 0 <= row < len(self.rows_) and 0 <= column < len(self.rows_[row]):
+        if marker in self.loaded and 0 <= row < len(self.rows_) and 0 <= column < len(self.rows_[row]):
             return self.rows_[row][column]
         return None
+
+    def get(self, marker):
+        return self.loaded.get(marker)
+
+    def rows(self, marker, first, last):
+        return b"png %s %d-%d" % (marker.encode(), first, last)
 
 
 class MarkerTests(unittest.TestCase):
@@ -162,6 +176,251 @@ class SequenceTests(unittest.TestCase):
         self.assertIn("preserveAspectRatio=0;doNotMoveCursor=1\x07", out)
         self.assertEqual(out.count("FilePart="), 6)
         self.assertTrue(out.endswith("\x1b]1337;FileEnd\x07\x1b8"))
+
+
+OTHER = bytes([0x40, 0x07, 0x99])
+
+
+def other_row(row, width=8, left=20, fill="▓"):
+    """A row of a second box, further right, with a marker of its own."""
+    marker = [chr(code) for code in overlay.render.marker_glyphs(OTHER, row)]
+    return [" "] * left + marker + [fill] * (width - len(marker))
+
+
+class TwoBoxes(Overlays):
+    """Two boxes; the first one's PNG cannot be cut."""
+
+    def __init__(self):
+        super().__init__(rows=2)
+        self.loaded[OTHER.hex()] = (8, 2, b"other")
+        self.other = [other_row(row, left=0)[:8] for row in range(2)]
+
+    def glyph(self, marker, row, column):
+        if marker == OTHER.hex():
+            return self.other[row][column] if 0 <= row < 2 and 0 <= column < 8 else None
+        return super().glyph(marker, row, column)
+
+    def rows(self, marker, first, last):
+        if marker == MARKER.hex():
+            raise OSError("the PNG is damaged")
+        return super().rows(marker, first, last)
+
+
+class Session:
+    """The API's Session: hands out the screens in turn (the last one again and again)."""
+
+    def __init__(self, screens, width=40):
+        self.screens = list(screens)
+        self.reads = 0
+        self.injected = []
+        self.grid_size = SimpleNamespace(width=width)
+
+    async def async_get_screen_contents(self):
+        screen = self.screens[min(self.reads, len(self.screens) - 1)]
+        self.reads += 1
+        return screen
+
+    async def async_inject(self, data):
+        self.injected.append(data)
+
+
+def joined(*parts):
+    """One screen row made of several lists of cells, padded to 40."""
+    row = []
+
+    for part in parts:
+        row = row + part
+
+    return row + [" "] * (40 - len(row))
+
+
+class TimingTests(unittest.TestCase):
+    def watcher(self):
+        return overlay.Watcher(None, None, lambda delay=0: None)
+
+    def test_a_quiet_screen_draws_at_once(self):
+        watcher = self.watcher()
+        watcher.changed_at = 100.0
+        self.assertEqual(watcher.wait_needed(now=100.0 + overlay.QUIET_SECONDS + 0.001, since=100.0), 0)
+
+    def test_a_busy_screen_waits_for_the_box_to_stand_still(self):
+        watcher = self.watcher()
+        watcher.changed_at = 100.0
+        self.assertGreater(watcher.wait_needed(now=100.1, since=100.0), 0)
+        self.assertEqual(watcher.wait_needed(now=100.1, since=100.1 - overlay.BUSY_STEADY_SECONDS), 0)
+
+    def test_a_busy_screen_draws_nothing_on_the_first_look(self):
+        rows = [box_row(row) for row in range(2)]
+        session = Session([Screen(rows)])
+        woken = []
+        watcher = overlay.Watcher(session, TwoBoxes(), lambda delay=0: woken.append(delay))
+        watcher.screen_changed()
+        asyncio.run(watcher.look())
+        self.assertEqual(session.injected, [])
+        self.assertTrue(woken and woken[0] > 0)
+
+
+class WatcherTests(unittest.TestCase):
+    def setUp(self):
+        # The screen counts as quiet at once, so a box is drawn on the first look.
+        patcher = mock.patch.object(overlay, "QUIET_SECONDS", 0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def look(self, watcher):
+        asyncio.run(watcher.look())
+
+    def test_one_failing_box_does_not_stop_the_others(self):
+        rows = [joined(box_row(row), other_row(row, left=10)) for row in range(2)]
+        session = Session([Screen(rows)])
+        watcher = overlay.Watcher(session, TwoBoxes(), lambda delay=0: None)
+        self.look(watcher)
+        self.assertEqual(len(session.injected), 1)
+        self.assertIn(OTHER.hex().encode(), base64.b64decode(session.injected[0].split(b"FilePart=")[1].split(b"\x07")[0]))
+
+    def test_a_failing_check_does_not_stop_the_others(self):
+        class Broken(TwoBoxes):
+            def glyph(self, marker, row, column):
+                if marker == MARKER.hex():
+                    raise ValueError("a damaged record")
+                return super().glyph(marker, row, column)
+
+            def rows(self, marker, first, last):
+                return Overlays.rows(self, marker, first, last)
+
+        image = [" ", " "] + [None] * 8
+        rows = [joined(image, other_row(row, left=10)) for row in range(2)]
+        session = Session([Screen(rows)])
+        watcher = overlay.Watcher(session, Broken(), lambda delay=0: None)
+        watcher.placements.append({"marker": MARKER.hex(), "first": 0, "top": 0, "column": 2, "rows": 2, "columns": 8})
+        # The image of the first box is painted over, so its check reads the glyphs, and fails.
+        session.screens = [Screen([joined(box_row(0), other_row(0, left=10)), joined(box_row(1), other_row(1, left=10))])]
+        session.screens[0].rows[0].cells[12] = "x"  # not a marker any more: no new draw of the first box
+        self.look(watcher)
+        self.assertEqual([data.count(b"FileEnd") for data in session.injected], [1])
+        self.assertEqual(watcher.placements[-1]["marker"], OTHER.hex())
+
+    def painted(self):
+        """A box drawn on rows 0-1, then painted over in place with its glyphs."""
+        image = [" ", " "] + [None] * 8
+        drawn = Screen([image, image])
+        painted = [box_row(0), box_row(1)]
+        # A cell in the marker is overwritten, so step 2 does not find the box: only step 1 can draw it.
+        painted[0][2] = "x"
+        painted[1][2] = "x"
+        overlays = Overlays(rows=2)
+        overlays.rows_[0][0] = "x"
+        overlays.rows_[1][0] = "x"
+        placement = {"marker": MARKER.hex(), "first": 0, "top": 0, "column": 2, "rows": 2, "columns": 8}
+        return drawn, Screen(painted), overlays, placement
+
+    def test_painted_again_is_read_again_before_the_draw(self):
+        drawn, painted, overlays, placement = self.painted()
+        session = Session([painted, painted])
+        woken = []
+        watcher = overlay.Watcher(session, overlays, woken.append)
+        watcher.placements.append(dict(placement))
+        self.look(watcher)
+        self.assertEqual(session.reads, 2)  # the look, and the read just before the draw
+        self.assertEqual(len(session.injected), 1)
+
+    def test_painted_but_moved_meanwhile_is_not_drawn(self):
+        drawn, painted, overlays, placement = self.painted()
+        elsewhere = Screen(["  some other text", "  and a prompt"])
+        session = Session([painted, elsewhere])
+        woken = []
+        watcher = overlay.Watcher(session, overlays, woken.append)
+        watcher.placements.append(dict(placement))
+        self.look(watcher)
+        self.assertEqual(session.reads, 2)
+        self.assertEqual(session.injected, [])
+        self.assertEqual(woken, [0])  # another look decides what it is now
+
+    def test_an_unchanged_placement_is_not_checked_again(self):
+        image = [" ", " "] + [None] * 8
+        screen = Screen([image, image])
+        overlays = Overlays(rows=2)
+        watcher = overlay.Watcher(Session([screen]), overlays, lambda delay=0: None)
+        watcher.placements.append({"marker": MARKER.hex(), "first": 0, "top": 0, "column": 2, "rows": 2, "columns": 8})
+        self.look(watcher)
+
+        with mock.patch.object(overlay, "damage", side_effect=AssertionError("checked again")):
+            self.look(watcher)
+
+        self.assertEqual(len(watcher.placements), 1)
+
+
+class SnapshotTests(unittest.TestCase):
+    def test_each_line_is_read_once(self):
+        screen = Screen([box_row(0), list("text".ljust(30))])
+        calls = []
+        original = screen.line
+        screen.line = lambda row: calls.append(row) or original(row)
+        snapshot = overlay.Snapshot(screen)
+        list(overlay.markers_in(snapshot, 30))
+        overlay.damage({"marker": MARKER.hex(), "first": 0, "top": 0, "column": 2, "rows": 2, "columns": 8}, snapshot, Overlays())
+        self.assertEqual(sorted(calls), [0, 1])
+
+
+class RecordTests(unittest.TestCase):
+    """The real Overlays, against records render.py writes."""
+
+    def setUp(self):
+        self.folder = tempfile.TemporaryDirectory()
+        self.addCleanup(self.folder.cleanup)
+        patcher = mock.patch.dict(os.environ, {"INLINE_IMAGES_CACHE": self.folder.name})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def render(self, *args, stdin=None):
+        result = subprocess.run(
+            [sys.executable, os.path.join(BIN, "render.py"), *args], input=stdin, capture_output=True, text=True, env=os.environ
+        )
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    def test_the_daemon_finds_what_render_registers(self):
+        data = base64.b64encode(render.png_bytes(4, 4, bytes((9, 9, 9, 255)) * 16)).decode()
+        stored = self.render("inspect", stdin=data)
+        out = self.render("cells", stored["path"], "--columns", "8", "--rows", "4", "--marker")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(overlay.overlay_dir(), os.path.join(render.cache_dir(), "overlays"))
+        found = overlay.Overlays().get(out["marker"])
+        self.assertIsNotNone(found)
+        self.assertEqual(found[:2], (8, 4))
+
+    def test_a_missing_record_is_not_looked_for_again_at_once(self):
+        overlays = overlay.Overlays()
+
+        with mock.patch.object(overlay, "overlay_dir", wraps=overlay.overlay_dir) as looked:
+            self.assertIsNone(overlays.get("abcdef"))
+            self.assertIsNone(overlays.get("abcdef"))
+            self.assertEqual(looked.call_count, 1)
+
+    @unittest.skipIf(overlay.Image is None, "Pillow is not installed")
+    def test_records_and_cut_rows_are_bounded(self):
+        overlays = overlay.Overlays()
+        picture = io.BytesIO()
+        overlay.Image.new("RGBA", (8, 40), (1, 2, 3, 255)).save(picture, "PNG")
+
+        for index in range(overlay.MAX_RECORDS + 5):
+            overlays.loaded[str(index)] = (8, 4, picture.getvalue())
+            overlays.glyphs[str(index)] = ""
+
+            while len(overlays.loaded) > overlay.MAX_RECORDS:
+                overlays.forget(next(iter(overlays.loaded)))
+
+        self.assertEqual(len(overlays.loaded), overlay.MAX_RECORDS)
+
+        with mock.patch.object(overlay, "MAX_CROP_BYTES", 1):
+            first = overlays.rows("10", 0, 1)
+            overlays.rows("10", 1, 2)
+            overlays.rows("10", 2, 3)
+
+        self.assertEqual(len(overlays.crops), 1)
+        self.assertLessEqual(len(overlays.pictures), overlay.MAX_PICTURES)
+
+        with overlay.Image.open(io.BytesIO(first)) as cut:
+            self.assertEqual(cut.size, (8, 20))
 
 
 if __name__ == "__main__":

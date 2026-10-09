@@ -20,7 +20,8 @@ keep the screen right:
    cells and no marker of that box shows: the image is drawn again in place.
 
 A box is drawn only where it stands still for one look, and only the rows of it
-that are on the screen, so a draw never scrolls the screen.
+that are on the screen, so a draw never scrolls the screen. Before any draw the
+screen is read again, and the box must still be where it was.
 
     iterm_overlay.py --session <ITERM_SESSION_ID>
 
@@ -36,18 +37,36 @@ import base64
 import io
 import json
 import os
+import re
 import sys
-import tempfile
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
+
+# render.py sits beside this file; it knows where the cache is. It needs no
+# Pillow to be imported.
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+
+import render  # noqa: E402
 
 SIGNATURE = "⣿"
 MARKER_CELLS = 5
 BLANK = 0x2800
 CHUNK = 65536  # base64 characters in one FilePart
 SETTLE_SECONDS = 0.03  # let a frame that is being written finish first
-STEADY_SECONDS = 0.06  # a box must stand still this long before it is drawn
+QUIET_SECONDS = 0.3  # draw when the screen has not changed for this long
+BUSY_STEADY_SECONDS = 2.0  # or, while it keeps changing (a turn runs), when a box stood still this long
 HEARTBEAT_SECONDS = 0.5  # look anyway, in case a change was not reported
+LOOK_INTERVAL = 0.1  # at most ten looks a second: a burst of changes is one look
+LOOK_SECONDS = 10  # a look that takes longer is stuck: give up on it
+MISSING_SECONDS = 5  # a marker with no record is not looked for again until then
+MAX_RECORDS = 64  # records kept in memory, the least recently used dropped first
+MAX_PICTURES = 4  # decoded box PNGs kept to cut rows from
+MAX_CROP_BYTES = 64 * 1024 * 1024  # PNGs of cut rows kept
+
+BRAILLE = re.compile("[⠀-⣿]")
 
 
 def emit(message):
@@ -71,30 +90,50 @@ except ImportError:  # without Pillow, only a box that is all on the screen is d
 
 
 def overlay_dir():
-    return os.path.join(tempfile.gettempdir(), "inline-images-%d" % os.getuid(), "overlays")
+    """Where render.py writes its records: the same function finds the cache."""
+    return os.path.join(render.cache_dir(), "overlays")
 
 
 class Overlays:
-    """The images the mod registered, by marker, read when first seen."""
+    """The images the mod registered, by marker, read when first seen.
+
+    Everything here is bounded: records, decoded pictures and cut rows are each
+    dropped least recently used first, so a long session does not grow.
+    """
 
     def __init__(self):
-        self.loaded = {}
-        self.crops = {}
+        self.loaded = OrderedDict()  # marker -> (columns, rows, PNG bytes)
         self.glyphs = {}
+        self.missing = {}  # marker -> when it had no record
+        self.pictures = OrderedDict()  # marker -> the decoded PNG
+        self.crops = OrderedDict()  # (marker, first, last) -> PNG bytes
+        self.crop_bytes = 0
 
     def glyph(self, marker, row, column):
         """The glyph that render.py drew at one cell of a box, or None."""
-        columns = self.loaded[marker][0]
+        found = self.loaded.get(marker)
+
+        if found is None:
+            return None
+
+        columns = found[0]
         glyphs = self.glyphs.get(marker, "")
         at = row * columns + column
 
         return glyphs[at] if 0 <= column < columns and 0 <= at < len(glyphs) else None
 
     def get(self, marker):
-        if marker in self.loaded:
-            return self.loaded[marker]
+        found = self.loaded.get(marker)
 
-        found = None
+        if found is not None:
+            self.loaded.move_to_end(marker)
+            return found
+
+        now = time.monotonic()
+
+        # Braille text can look like a marker by chance: do not read the disk at every look for it.
+        if now - self.missing.get(marker, -MISSING_SECONDS) < MISSING_SECONDS:
+            return None
 
         try:
             with open(os.path.join(overlay_dir(), marker + ".json")) as handle:
@@ -104,12 +143,47 @@ class Overlays:
                 data = handle.read()
 
             found = (int(record["columns"]), int(record["rows"]), data)
-            self.glyphs[marker] = record.get("glyphs", "")
-        except (OSError, ValueError, KeyError):
-            pass  # not registered (yet): look again next time
+            glyphs = str(record.get("glyphs", ""))
+        except (OSError, ValueError, KeyError, TypeError, render.UnsafeCache) as problem:
+            debug("no record for %s: %s" % (marker, problem))
+
+            if len(self.missing) > 4096:
+                self.missing.clear()
+
+            self.missing[marker] = now
+            return None  # not registered (yet): look again later
+
+        self.missing.pop(marker, None)
+        self.loaded[marker] = found
+        self.glyphs[marker] = glyphs
+
+        while len(self.loaded) > MAX_RECORDS:
+            self.forget(next(iter(self.loaded)))
+
+        return found
+
+    def forget(self, marker):
+        self.loaded.pop(marker, None)
+        self.glyphs.pop(marker, None)
+        self.pictures.pop(marker, None)
+
+        for key in [key for key in self.crops if key[0] == marker]:
+            self.crop_bytes -= len(self.crops.pop(key))
+
+    def picture(self, marker):
+        """The box PNG decoded, once for all the cuts of it."""
+        found = self.pictures.get(marker)
 
         if found is not None:
-            self.loaded[marker] = found
+            self.pictures.move_to_end(marker)
+            return found
+
+        found = Image.open(io.BytesIO(self.loaded[marker][2]))
+        found.load()
+        self.pictures[marker] = found
+
+        while len(self.pictures) > MAX_PICTURES:
+            self.pictures.popitem(last=False)
 
         return found
 
@@ -121,20 +195,30 @@ class Overlays:
             return data
 
         key = (marker, first, last)
+        found = self.crops.get(key)
 
-        if key not in self.crops:
-            if Image is None:
-                return None
+        if found is not None:
+            self.crops.move_to_end(key)
+            return found
 
-            with Image.open(io.BytesIO(data)) as picture:
-                top = round(picture.height * first / rows)
-                bottom = round(picture.height * (last + 1) / rows)
-                out = io.BytesIO()
-                picture.crop((0, top, picture.width, bottom)).save(out, "PNG")
+        if Image is None:
+            return None
 
-            self.crops[key] = out.getvalue()
+        picture = self.picture(marker)
+        top = round(picture.height * first / rows)
+        bottom = round(picture.height * (last + 1) / rows)
+        out = io.BytesIO()
+        # Level 1: the PNG goes straight to iTerm2 on this machine, so speed beats size.
+        picture.crop((0, top, picture.width, bottom)).save(out, "PNG", compress_level=1)
+        found = out.getvalue()
+        self.crops[key] = found
+        self.crop_bytes += len(found)
 
-        return self.crops[key]
+        while self.crop_bytes > MAX_CROP_BYTES and len(self.crops) > 1:
+            _, old = self.crops.popitem(last=False)
+            self.crop_bytes -= len(old)
+
+        return found
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +247,50 @@ def is_image(line, column):
     return found is not None and found.image is not None and found.image.name == "ITERM2"
 
 
+class Snapshot:
+    """One read of the screen, each row's cells read at most once.
+
+    The API builds a new LineContents, parsing all its style runs, at every
+    call of `line`, and a look asks for the same rows many times: for markers,
+    for damage, for clean runs. Here a row is read once, into a list of
+    (text, is an image) for each cell.
+    """
+
+    def __init__(self, contents):
+        self.contents = contents
+        self.number_of_lines = contents.number_of_lines
+        self.number_of_lines_above_screen = getattr(contents, "number_of_lines_above_screen", 0)
+        self.lines = {}
+        self.rows = {}
+
+    def line(self, row):
+        found = self.lines.get(row)
+
+        if found is None:
+            found = self.lines[row] = self.contents.line(row)
+
+        return found
+
+    def text(self, row):
+        return self.line(row).string
+
+    def cells(self, row, width):
+        """(text, is an image) for the first `width` cells of a row, at least."""
+        found = self.rows.get(row)
+
+        if found is None or len(found) < width:
+            line = self.line(row)
+            found = found or []
+            found.extend((cell(line, column), is_image(line, column)) for column in range(len(found), width))
+            self.rows[row] = found
+
+        return found
+
+
+def snapshot(contents):
+    return contents if isinstance(contents, Snapshot) else Snapshot(contents)
+
+
 def read_marker(glyphs):
     """The (marker, row) that five glyphs carry, or None: render.py's marker_glyphs, undone."""
     if len(glyphs) != MARKER_CELLS or any(len(glyph) != 1 or not BLANK <= ord(glyph) <= BLANK + 0xFF for glyph in glyphs):
@@ -177,17 +305,26 @@ def read_marker(glyphs):
     return marker.hex(), row
 
 
+def is_braille(text):
+    return len(text) == 1 and BLANK <= ord(text) <= BLANK + 0xFF
+
+
 def markers_in(contents, width):
     """Each row marker on the screen: (screen row, column, marker, row of the box)."""
-    for row in range(contents.number_of_lines):
-        line = contents.line(row)
-        text = line.string
+    screen = snapshot(contents)
 
-        if not any(BLANK <= ord(character) <= BLANK + 0xFF for character in text):
+    for row in range(screen.number_of_lines):
+        # Most rows have no braille at all: one search of the row's text skips them.
+        if not BRAILLE.search(screen.text(row)):
             continue
 
+        texts = [text for text, _ in screen.cells(row, width)]
+
         for column in range(max(0, width - MARKER_CELLS + 1)):
-            found = read_marker([cell(line, column + i) for i in range(MARKER_CELLS)])
+            if not is_braille(texts[column]):
+                continue
+
+            found = read_marker(texts[column : column + MARKER_CELLS])
 
             if found is not None:
                 yield (row, column) + found
@@ -234,7 +371,7 @@ def sequence(row, column, columns, rows, data):
     ).encode()
 
 
-BLANKS = (" ", "\u2800", "", "\x00")
+BLANKS = (" ", "⠀", "", "\x00")
 
 
 def damage(placement, contents, overlays):
@@ -248,25 +385,26 @@ def damage(placement, contents, overlays):
                watching; when it goes, the box cells come back as "painted".
     "gone":    nothing of the image or the box is left.
     """
+    screen = snapshot(contents)
     images = matching = foreign = 0
     telling = False
+    end = placement["column"] + placement["columns"]
 
     for index in range(placement["rows"]):
         row = placement["top"] + index
 
-        if not 0 <= row < contents.number_of_lines:
+        if not 0 <= row < screen.number_of_lines:
             continue  # off the screen: what is left is all that can be checked
 
-        line = contents.line(row)
+        cells = screen.cells(row, end)
 
         for offset in range(placement["columns"]):
-            column = placement["column"] + offset
+            text, image = cells[placement["column"] + offset]
 
-            if is_image(line, column):
+            if image:
                 images += 1
                 continue
 
-            text = cell(line, column)
             expected = overlays.glyph(placement["marker"], placement["first"] + index, offset)
 
             if expected is not None and (text == expected or (text in BLANKS and expected in BLANKS)):
@@ -285,24 +423,36 @@ def damage(placement, contents, overlays):
     return "gone" if images == 0 and not telling else "covered"
 
 
+def signature(placement, contents):
+    """What `damage` reads for a placement: when it has not changed, neither has the answer."""
+    screen = snapshot(contents)
+    end = placement["column"] + placement["columns"]
+    rows = range(max(0, placement["top"]), min(screen.number_of_lines, placement["top"] + placement["rows"]))
+
+    return (placement["top"],) + tuple(tuple(screen.cells(row, end)[placement["column"] : end]) for row in rows)
+
+
 def clean_runs(marker, top, column, first, last, contents, overlays):
     """The runs of box rows that show only the box: its glyphs, or its image.
 
     A row with anything else on it (Claude Code draws hints and menus over the
     transcript) is left out, so the image never hides them.
     """
+    screen = snapshot(contents)
+    columns = overlays.loaded[marker][0]
     runs = []
     start = None
 
     for index in range(first, last + 1):
-        line = contents.line(top + index)
+        cells = screen.cells(top + index, column + columns)
         clean = True
 
-        for offset in range(overlays.loaded[marker][0]):
-            if is_image(line, column + offset):
+        for offset in range(columns):
+            text, image = cells[column + offset]
+
+            if image:
                 continue
 
-            text = cell(line, column + offset)
             expected = overlays.glyph(marker, index, offset)
 
             if expected is None or not (text == expected or (text in BLANKS and expected in BLANKS)):
@@ -324,38 +474,170 @@ def clean_runs(marker, top, column, first, last, contents, overlays):
 # ---------------------------------------------------------------------------
 
 
-async def watch(connection, session_id):
-    import iterm2
+class Watcher:
+    """What one look at the screen does. `session` is the API's Session, or a fake.
 
-    app = await iterm2.async_get_app(connection)
-    session = app.get_session_by_id(session_id)
+    `wake(delay)` asks for another look after `delay` seconds.
+    """
 
-    if session is None:
-        emit({"ok": False, "error": "iTerm2 has no session %s" % session_id})
-        return
+    def __init__(self, session, overlays, wake):
+        self.session = session
+        self.overlays = overlays
+        self.wake = wake
+        self.placements = []  # what this daemon drew and has not seen broken
+        self.seen = {}  # box -> when it was first seen where it is
+        self.scrolled = None  # lines above the screen at the last look
+        # When the screen last changed. Claude Code writes each frame as a
+        # synchronized update, and what the API reports can lag a frame that is
+        # arriving: a draw made then lands where the box was, not where it is.
+        # So a box is drawn when the screen is quiet, or has long stood still.
+        self.changed_at = 0.0
 
-    overlays = Overlays()
-    placements = []  # what this daemon drew and has not seen broken
-    seen = {}  # box -> when it was first seen where it is
-    scrolled = None  # lines above the screen at the last look
-    changed = asyncio.Event()
-    parent = os.getppid()
+    def screen_changed(self):
+        self.changed_at = time.monotonic()
 
-    async def draw(marker, top, column, first, last, contents):
-        for run in clean_runs(marker, top, column, first, last, contents, overlays):
-            await draw_rows(marker, top, column, run[0], run[1])
+    def wait_needed(self, now, since):
+        """How long to wait before a draw is safe, or 0 when it is safe now."""
+        quiet = QUIET_SECONDS - (now - self.changed_at)
+        steady = BUSY_STEADY_SECONDS - (now - since)
 
-    async def draw_rows(marker, top, column, first, last):
-        columns, rows, _ = overlays.get(marker)
-        data = overlays.rows(marker, first, last)
+        return 0 if quiet <= 0 or steady <= 0 else min(quiet, steady)
+
+    async def read(self):
+        return Snapshot(await self.session.async_get_screen_contents())
+
+    def drop(self, placement):
+        if placement in self.placements:
+            self.placements.remove(placement)
+
+    async def look(self):
+        screen = await self.read()
+        above = screen.number_of_lines_above_screen
+        width = self.session.grid_size.width
+
+        # Lines that went into the scrollback took the images with them.
+        if self.scrolled is not None and above != self.scrolled:
+            for placement in self.placements:
+                placement["top"] -= above - self.scrolled
+
+        self.scrolled = above
+        boxes = list(spans(markers_in(screen, width)))
+
+        # 1. The images already drawn: still whole, painted over in place, covered, or gone.
+        # One box that fails (a record half gone, a PNG that will not cut) must not stop the others.
+        for placement in list(self.placements):
+            try:
+                await self.check(placement, screen, boxes, above)
+            except Exception as problem:
+                self.drop(placement)
+                debug("error checking %s: %s: %s" % (placement["marker"], type(problem).__name__, problem))
+
+        # 2. Boxes on the screen that show their markers: draw the image.
+        now = time.monotonic()
+
+        for box in boxes:
+            try:
+                await self.show(box, screen, above, width, now)
+            except Exception as problem:
+                debug("error drawing %s: %s: %s" % (box[0], type(problem).__name__, problem))
+
+        for box in list(self.seen):
+            if box not in boxes:
+                del self.seen[box]
+
+    async def check(self, placement, screen, boxes, above):
+        top = placement["top"] - placement["first"]  # the screen row of the box's row 0
+        moved = any(box[0] == placement["marker"] and box[2] != top for box in boxes)
+
+        if placement["top"] + placement["rows"] <= 0 or placement["top"] >= screen.number_of_lines or moved:
+            self.drop(placement)  # off the screen, or the box is somewhere else now
+            return
+
+        if self.overlays.get(placement["marker"]) is None:
+            self.drop(placement)  # its record is gone: nothing to compare the screen with
+            return
+
+        mark = signature(placement, screen)
+
+        if mark == placement.get("signature"):
+            return  # its cells are as they were at the last look, and so is its state
+
+        state = damage(placement, screen, self.overlays)
+
+        if state in ("intact", "covered"):
+            placement["signature"] = mark
+            return
+
+        debug("%s %s at screen row %d" % (state, placement["marker"], placement["top"]))
+
+        if state == "gone":
+            self.drop(placement)
+            return
+
+        # Painted over in place. Wait for a quiet screen, as step 2 does, then read
+        # it again just before the draw: Claude Code may have moved or covered the box.
+        wait = self.wait_needed(time.monotonic(), time.monotonic())
+
+        if wait > 0:
+            self.wake(wait + 0.01)
+            return
+
+        fresh = await self.read()
+
+        if fresh.number_of_lines_above_screen != above or damage(placement, fresh, self.overlays) != "painted":
+            self.wake(0)  # it changed: the next look decides what it is now
+            return
+
+        self.drop(placement)
+        first = max(placement["first"], -top)
+        last = min(placement["first"] + placement["rows"] - 1, fresh.number_of_lines - 1 - top)
+        await self.draw(placement["marker"], top, placement["column"], first, last, fresh)
+
+    async def show(self, box, screen, above, width, now):
+        marker, column, top, first, last = box
+        found = self.overlays.get(marker)
+
+        if found is None:
+            return
+
+        columns, rows, _ = found
+        last = min(last, rows - 1)
+        first_row, last_row = top + first, top + last
+
+        # Only rows that are on the screen: an image below the last row would scroll it.
+        if first > last or first_row < 0 or last_row >= screen.number_of_lines or column + columns > width:
+            return
+
+        wait = self.wait_needed(now, self.seen.setdefault(box, now))
+
+        if wait > 0:
+            self.wake(wait + 0.01)
+            return
+
+        # Read the screen again just before the draw: the box must still be there.
+        fresh = await self.read()
+
+        if fresh.number_of_lines_above_screen != above or box not in set(spans(markers_in(fresh, width))):
+            self.wake(0)
+            return
+
+        await self.draw(marker, top, column, first, last, fresh)
+
+    async def draw(self, marker, top, column, first, last, contents):
+        for run in clean_runs(marker, top, column, first, last, contents, self.overlays):
+            await self.draw_rows(marker, top, column, run[0], run[1])
+
+    async def draw_rows(self, marker, top, column, first, last):
+        columns, rows, _ = self.overlays.get(marker)
+        data = self.overlays.rows(marker, first, last)
 
         if data is None:
             return
 
         # The new image replaces any older one of this box on these rows.
-        placements[:] = [
+        self.placements[:] = [
             placement
-            for placement in placements
+            for placement in self.placements
             if not (
                 placement["marker"] == marker
                 and placement["top"] - placement["first"] == top
@@ -363,7 +645,7 @@ async def watch(connection, session_id):
                 and first <= placement["first"] + placement["rows"] - 1
             )
         ]
-        placements.append(
+        self.placements.append(
             {
                 "marker": marker,
                 "first": first,
@@ -374,87 +656,35 @@ async def watch(connection, session_id):
             }
         )
         debug("draw %s rows %d-%d of %d at screen row %d, %d bytes" % (marker, first, last, rows, top + first, len(data)))
-        await session.async_inject(sequence(top + first, column, columns, last - first + 1, data))
+        await self.session.async_inject(sequence(top + first, column, columns, last - first + 1, data))
 
-    async def look():
-        nonlocal scrolled
 
-        contents = await session.async_get_screen_contents()
-        above = contents.number_of_lines_above_screen
-        width = session.grid_size.width
-        lines = contents.number_of_lines
+async def watch(connection, session_id, parent):
+    import iterm2
 
-        # Lines that went into the scrollback took the images with them.
-        if scrolled is not None and above != scrolled:
-            for placement in placements:
-                placement["top"] -= above - scrolled
+    app = await iterm2.async_get_app(connection)
+    session = app.get_session_by_id(session_id)
 
-        scrolled = above
-        boxes = list(spans(markers_in(contents, width)))
+    if session is None:
+        emit({"ok": False, "error": "iTerm2 has no session %s" % session_id})
+        return
 
-        # 1. The images already drawn: still whole, painted over in place, covered, or gone.
-        for placement in list(placements):
-            top = placement["top"] - placement["first"]  # the screen row of the box's row 0
-            moved = any(box[0] == placement["marker"] and box[2] != top for box in boxes)
+    changed = asyncio.Event()
+    loop = asyncio.get_running_loop()
 
-            if placement["top"] + placement["rows"] <= 0 or placement["top"] >= lines or moved:
-                placements.remove(placement)  # off the screen, or the box is somewhere else now
-                continue
+    def wake(delay=0):
+        if delay > 0:
+            loop.call_later(delay, changed.set)
+        else:
+            changed.set()
 
-            state = damage(placement, contents, overlays)
-
-            if state in ("intact", "covered"):
-                continue
-
-            placements.remove(placement)
-            debug("%s %s at screen row %d" % (state, placement["marker"], placement["top"]))
-
-            if state == "painted":
-                first = max(placement["first"], -top)
-                last = min(placement["first"] + placement["rows"] - 1, lines - 1 - top)
-                await draw(placement["marker"], top, placement["column"], first, last, contents)
-
-        # 2. Boxes on the screen that show their markers: draw the image.
-        now = time.monotonic()
-
-        for box in boxes:
-            marker, column, top, first, last = box
-            found = overlays.get(marker)
-
-            if found is None:
-                continue
-
-            columns, rows, _ = found
-            last = min(last, rows - 1)
-            first_row, last_row = top + first, top + last
-
-            # Only rows that are on the screen: an image below the last row would scroll it.
-            if first > last or first_row < 0 or last_row >= lines or column + columns > width:
-                continue
-
-            since = seen.setdefault(box, now)
-
-            if now - since < STEADY_SECONDS:
-                asyncio.get_running_loop().call_later(STEADY_SECONDS, changed.set)
-                continue
-
-            # Read the screen again just before the draw: the box must still be there.
-            fresh = await session.async_get_screen_contents()
-
-            if fresh.number_of_lines_above_screen != above or box not in set(spans(markers_in(fresh, width))):
-                changed.set()
-                continue
-
-            await draw(marker, top, column, first, last, fresh)
-
-        for box in list(seen):
-            if box not in boxes:
-                del seen[box]
+    watcher = Watcher(session, Overlays(), wake)
 
     async def stream():
         async with session.get_screen_streamer(want_contents=False) as streamer:
             while True:
                 await streamer.async_get()
+                watcher.screen_changed()
                 changed.set()
 
     async def heartbeat():
@@ -471,6 +701,7 @@ async def watch(connection, session_id):
     tasks = [asyncio.ensure_future(job()) for job in (stream, heartbeat)]
     ending = asyncio.ensure_future(orphaned())
     changed.set()
+    last_look = 0.0
 
     while not ending.done() and not tasks[0].done():
         waiting = asyncio.ensure_future(changed.wait())
@@ -480,11 +711,20 @@ async def watch(connection, session_id):
             waiting.cancel()
             continue
 
+        # At most ten looks a second: the changes that come meanwhile are one look.
+        pause = last_look + LOOK_INTERVAL - time.monotonic()
+
+        if pause > 0:
+            await asyncio.sleep(pause)
+
         changed.clear()
         await asyncio.sleep(SETTLE_SECONDS)
+        last_look = time.monotonic()
 
         try:
-            await look()
+            await asyncio.wait_for(watcher.look(), LOOK_SECONDS)
+        except asyncio.TimeoutError:
+            debug("a look took more than %d s: given up" % LOOK_SECONDS)
         except Exception as problem:  # one bad frame must not end the overlay
             debug("error %s: %s" % (type(problem).__name__, problem))
 
@@ -498,6 +738,14 @@ def main():
     arguments = parser.parse_args()
     session_id = arguments.session.split(":")[-1]
 
+    # The parent, read before the connection: if it is gone already (the
+    # process is init's), nothing would ever end this daemon.
+    parent = os.getppid()
+
+    if parent == 1:
+        emit({"ok": False, "error": "the process that started the overlay has exited"})
+        sys.exit(1)
+
     try:
         import iterm2
     except ImportError:
@@ -505,7 +753,7 @@ def main():
         sys.exit(2)
 
     try:
-        iterm2.run_until_complete(lambda connection: watch(connection, session_id), retry=False)
+        iterm2.run_until_complete(lambda connection: watch(connection, session_id, parent), retry=False)
     except Exception as problem:
         emit(
             {

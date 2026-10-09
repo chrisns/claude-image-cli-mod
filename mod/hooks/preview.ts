@@ -1,4 +1,4 @@
-import { extract, formatBytes, type InlineHead } from './osc1337.ts'
+import { baseName, describe, extract, formatBytes, type InlineHead } from './osc1337.ts'
 
 export type Options = {
   renderer: 'auto' | 'cells' | 'image' | 'iterm'
@@ -25,8 +25,47 @@ export type Inspected = {
 export type Pic = {
   head: InlineHead
   inspect: () => Promise<Inspected>
-  /** The file a click opens, when it is not the stored copy: a delivered file. */
-  file?: string
+  /** Drop what `inspect` remembers, so the next draw reads the image again. */
+  forget: () => void
+}
+
+/**
+ * A map that keeps its most recently used entries: the module's caches live
+ * for the whole session, so each one is bounded.
+ */
+export class Lru<K, V> {
+  private readonly entries = new Map<K, V>()
+
+  constructor(private readonly limit: number) {}
+
+  get(key: K): V | undefined {
+    const value = this.entries.get(key)
+
+    if (value !== undefined) {
+      this.entries.delete(key)
+      this.entries.set(key, value)
+    }
+
+    return value
+  }
+
+  set(key: K, value: V): void {
+    this.entries.delete(key)
+    this.entries.set(key, value)
+
+    while (this.entries.size > this.limit) {
+      const oldest = this.entries.keys().next().value as K
+      this.entries.delete(oldest)
+    }
+  }
+
+  delete(key: K): void {
+    this.entries.delete(key)
+  }
+
+  get size(): number {
+    return this.entries.size
+  }
 }
 
 /** The file URL of a path, for a link a terminal opens. */
@@ -34,15 +73,27 @@ export function fileUrl(path: string): string {
   return `file://${path.split('/').map(encodeURIComponent).join('/')}`
 }
 
-
 /** Whether this terminal draws real pixels for an Image element. */
 export function drawsPixels(program: string | undefined, term: string | undefined, kitty: string | undefined): boolean {
   return program === 'ghostty' || term === 'xterm-ghostty' || term === 'xterm-kitty' || kitty !== undefined
 }
 
-/** The key under which a decoded image is remembered. */
+/**
+ * The key under which a decoded image is remembered: a hash of all of its data.
+ * Two FNV-1a hashes with different seeds make 64 bits, enough that two images
+ * in one session never share a key by chance.
+ */
 export function imageKey(base64: string): string {
-  return `${base64.length}:${base64.slice(0, 64)}:${base64.slice(-64)}`
+  let first = 0x811c9dc5
+  let second = 0x01000193 ^ base64.length
+
+  for (let index = 0; index < base64.length; index++) {
+    const code = base64.charCodeAt(index)
+    first = Math.imul(first ^ code, 0x01000193)
+    second = Math.imul(second ^ code, 0x5bd1e995)
+  }
+
+  return `data:${base64.length}:${(first >>> 0).toString(16)}${(second >>> 0).toString(16)}`
 }
 
 /** Where a tool saved an output that was too large to keep whole, when it did. */
@@ -81,7 +132,7 @@ export function caption(head: InlineHead, found: Inspected | undefined): string 
 
   if (head.name !== '') {
     // imgcat sends the path it was given: the file name says enough.
-    parts.push(head.name.split('/').pop() ?? head.name)
+    parts.push(baseName(head.name))
   }
 
   if (found !== undefined) {
@@ -109,9 +160,10 @@ export function readOptions(
 
   return {
     renderer: renderer === 'cells' || renderer === 'image' || renderer === 'iterm' ? renderer : 'auto',
-    maxColumns: Math.max(1, Math.min(255, number(options.max_columns, 100))),
-    maxRows: Math.max(1, Math.min(255, number(options.max_rows, 28))),
-    palette: Math.min(256, number(options.palette, 0)),
+    maxColumns: Math.round(Math.max(1, Math.min(255, number(options.max_columns, 100)))),
+    maxRows: Math.round(Math.max(1, Math.min(255, number(options.max_rows, 28)))),
+    // render.py takes whole numbers only.
+    palette: Math.round(Math.min(256, number(options.palette, 0))),
     python: typeof options.python === 'string' && options.python !== '' ? options.python : 'python3',
     helper: `${root}/bin/render.py`,
     overlay: `${root}/bin/iterm_overlay.py`,
@@ -161,13 +213,16 @@ export function withText(output: unknown, text: string): unknown {
 /**
  * The text of an output once its images are cut out: the pictures take their place.
  * An output that was only images says so, where the engine would say "No output".
+ * A download (`inline=0`) is not drawn, so it keeps a note in the text.
+ *
+ * `shown` is how many pictures are drawn when the text alone cannot tell: a tool
+ * cut a large output short, and the images came from the whole of it.
  */
-export function withoutImages(text: string): string {
-  const { text: rest, images } = extract(text, () => '', '')
-  // Data that a size limit cut off holds an image that `images` cannot count.
-  const count = Math.max(1, images.filter(image => image.isInline).length)
+export function withoutImages(text: string, shown?: number): string {
+  const { text: rest, images } = extract(text, image => (image.isInline ? '' : describe(image)), '')
+  const count = shown ?? images.filter(image => image.isInline).length
 
-  if (rest.trim() !== '' || !text.includes(']1337;')) {
+  if (rest.trim() !== '' || count === 0) {
     return rest
   }
 

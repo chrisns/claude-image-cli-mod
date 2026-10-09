@@ -2,7 +2,7 @@
 """Decode an image and turn it into something a terminal can draw.
 
 The mod calls this helper because the mod itself runs in a sandbox with no
-image decoder. Three commands, each prints one line of JSON on stdout:
+image decoder. Each command prints one line of JSON on stdout:
 
   inspect   Read base64 from stdin, store the image file in the cache and
             report its format and size in pixels.
@@ -22,35 +22,57 @@ and draws that PNG over the cells with the iTerm2 inline images protocol.
 
 Pillow is the decoder. ImageMagick (`magick`) is the fallback when Pillow is
 not installed. Only the Python standard library is needed besides those.
+
+Only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO are decoded. The type is read
+from the first bytes of the file before any decoder sees it, so a PostScript,
+PDF or SVG file never reaches Ghostscript or a delegate of ImageMagick.
+
+The cache is a folder only this user can use: ~/Library/Caches/inline-images
+on macOS, $XDG_CACHE_HOME/inline-images or ~/.cache/inline-images elsewhere.
+The environment variable INLINE_IMAGES_CACHE names another folder (the tests
+use it). bin/iterm_overlay.py reads the overlay records from the same folder.
 """
 
 import argparse
 import base64
 import binascii
+import contextlib
 import fcntl
 import hashlib
+import io
 import json
 import os
 import re
+import secrets
 import shutil
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import termios
 import time
+import unicodedata
+import warnings
 from array import array
+
+# A picture larger than this is refused before its pixels are decoded: a small
+# file can claim a huge size, and decoding it would take all the memory.
+MAX_PIXELS = 40_000_000
 
 try:
     from PIL import Image, ImageOps
 
-    Image.MAX_IMAGE_PIXELS = 178_956_970  # Pillow's own bomb limit is a warning only
+    # Pillow only warns between its limit and twice that; here a warning is an error.
+    Image.MAX_IMAGE_PIXELS = MAX_PIXELS
+    warnings.simplefilter("error", Image.DecompressionBombWarning)
     HAVE_PILLOW = True
 except ImportError:  # pragma: no cover - depends on the machine
     HAVE_PILLOW = False
 
 MAX_BYTES = 64 * 1024 * 1024
 MAX_AGE_SECONDS = 24 * 60 * 60
+CACHE_VARIABLE = "INLINE_IMAGES_CACHE"
 
 # Quadrant block glyphs. The index is a bitmask of the sub-pixels that take the
 # foreground colour: bit 0 top left, 1 top right, 2 bottom left, 3 bottom right.
@@ -58,6 +80,7 @@ QUADRANTS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
 
 DEFAULT_COLOUR = 0x01000000  # bit 24 alone: the terminal's own colour
 SEE_THROUGH_COST = 3 * 255 * 255
+SEE_THROUGH_ALPHA = 24  # a sub-pixel less opaque than this is not painted at all
 
 # The marker that iterm_overlay.py looks for, in the first cells of every row of
 # the grid: a check glyph, three glyphs for the id and one for the row. Braille,
@@ -85,97 +108,347 @@ def fail(message, code=1):
     sys.exit(code)
 
 
-def cache_dir():
-    path = os.path.join(tempfile.gettempdir(), "inline-images-%d" % os.getuid())
+# ---------------------------------------------------------------------------
+# The cache
+
+
+class UnsafeCache(Exception):
+    """The cache folder exists but another user could read or change it."""
+
+
+def cache_location():
+    """The cache folder's path. iterm_overlay.py calls this too, so both agree.
+
+    A folder in the user's home is preferred to one in the shared temporary
+    folder, where another user could make the folder first.
+    """
+    override = os.environ.get(CACHE_VARIABLE)
+
+    if override:
+        return os.path.abspath(override)
+
+    home = os.path.expanduser("~")
+
+    if os.path.isabs(home) and os.path.isdir(home) and os.access(home, os.W_OK | os.X_OK):
+        if sys.platform == "darwin":
+            return os.path.join(home, "Library", "Caches", "inline-images")
+
+        base = os.environ.get("XDG_CACHE_HOME", "")
+
+        if not os.path.isabs(base):  # the specification says to ignore a relative path
+            base = os.path.join(home, ".cache")
+
+        return os.path.join(base, "inline-images")
+
+    return os.path.join(tempfile.gettempdir(), "inline-images-%d" % os.getuid())
+
+
+def secure_folder(path):
+    """Make `path` a folder that only this user can use, or raise UnsafeCache.
+
+    A link could send the files somewhere else, and a folder that another user
+    owns or can write could hold files planted to be drawn or opened.
+    """
     os.makedirs(path, mode=0o700, exist_ok=True)
+    info = os.lstat(path)
+
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise UnsafeCache("the cache folder %s is a link or not a folder" % path)
+
+    if info.st_uid != os.getuid():
+        raise UnsafeCache("the cache folder %s belongs to another user" % path)
+
+    if info.st_mode & 0o077:
+        os.chmod(path, 0o700)  # ours, but made with a loose umask: tighten it
+        info = os.lstat(path)
+
+        if info.st_mode & 0o077:
+            raise UnsafeCache("other users can use the cache folder %s" % path)
+
     return path
 
 
+def cache_dir():
+    return secure_folder(cache_location())
+
+
+def write_atomic(path, data):
+    """Write a file in the cache so that no reader ever sees half of it.
+
+    The bytes go to a new file in the same folder, which then takes the name in
+    one step: two processes that store the same picture never trip each other.
+    """
+    descriptor, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".", suffix=".part")
+
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+
+        os.replace(temporary, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+        raise
+
+
 def prune(directory):
-    """Remove cached files nobody has touched for a day, and folders left empty."""
+    """Remove cached files nobody has touched for a day, and folders left empty.
+
+    lstat, so a link is judged by its own age and what it points to is never touched.
+    """
     cutoff = time.time() - MAX_AGE_SECONDS
 
-    for folder, _, names in os.walk(directory, topdown=False):
+    for folder, _, names in os.walk(directory, topdown=False, followlinks=False):
         for name in names:
             path = os.path.join(folder, name)
 
             try:
-                if os.path.getmtime(path) < cutoff:
+                if os.lstat(path).st_mtime < cutoff:
                     os.remove(path)
             except OSError:
-                pass
+                pass  # gone already: another process pruned it
 
         if folder != directory:
+            # Old folders only: another process may have just made this one, to
+            # put a link in it. rmdir only succeeds when the folder is empty.
             try:
-                os.rmdir(folder)  # only succeeds when it is empty
+                if os.lstat(folder).st_mtime < cutoff:
+                    os.rmdir(folder)
             except OSError:
                 pass
-
-
-def magick():
-    return shutil.which("magick") or shutil.which("convert")
 
 
 # ---------------------------------------------------------------------------
 # Loading
 
 
+# The formats this helper decodes: the name Pillow reports, the Pillow plugins
+# that may open it, ImageMagick's coder for it, and its file extension.
+FORMATS = {
+    "PNG": (["PNG"], "png", ".png"),
+    "JPEG": (["JPEG", "MPO"], "jpeg", ".jpg"),
+    "GIF": (["GIF"], "gif", ".gif"),
+    "WEBP": (["WEBP"], "webp", ".webp"),
+    "BMP": (["BMP"], "bmp", ".bmp"),
+    "TIFF": (["TIFF"], "tiff", ".tiff"),
+    "ICO": (["ICO"], "ico", ".ico"),
+}
+
+EXTENSIONS = {name: extension for name, (_, _, extension) in FORMATS.items()}
+EXTENSIONS["MPO"] = ".jpg"  # a camera's JPEG with a second picture in it
+
+UNSUPPORTED = "not a supported image format (PNG, JPEG, GIF, WebP, BMP, TIFF or ICO)"
+
+
+def sniff(head):
+    """The format of an image from its first bytes, or None when it is not one we decode."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "PNG"
+
+    if head.startswith(b"\xff\xd8\xff"):
+        return "JPEG"
+
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "GIF"
+
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "WEBP"
+
+    if head[:2] == b"BM":
+        return "BMP"
+
+    if head[:4] in (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+"):  # TIFF and BigTIFF
+        return "TIFF"
+
+    if head[:4] == b"\x00\x00\x01\x00":
+        return "ICO"
+
+    return None
+
+
+def sniff_file(path):
+    with open(path, "rb") as handle:
+        return sniff(handle.read(16))
+
+
+def check_size(width, height):
+    if width <= 0 or height <= 0:
+        fail("this image has no pixels")
+
+    if width * height > MAX_PIXELS:
+        fail("the image is too large: %d x %d pixels (at most %d million)" % (width, height, MAX_PIXELS // 1_000_000))
+
+
+def magick():
+    return shutil.which("magick") or shutil.which("convert")
+
+
+# ImageMagick's own limits, so that a file it does read cannot take the machine.
+MAGICK_LIMITS = [
+    "-limit", "memory", "256MiB",
+    "-limit", "map", "512MiB",
+    "-limit", "area", "64MP",
+    "-limit", "width", "16KP",
+    "-limit", "height", "16KP",
+]
+
+# EXIF orientations that turn the picture a quarter: its width and height swap.
+QUARTER_TURNS = {"LeftTop", "RightTop", "RightBottom", "LeftBottom"}
+
+
+def magick_source(path, label):
+    """The input argument for ImageMagick: the coder named, so it never guesses one.
+
+    Left to guess, ImageMagick hands PostScript to Ghostscript and reads MSL,
+    SVG and URLs; with `png:` in front, the file is read as a PNG or not at all.
+    """
+    return "%s:%s[0]" % (FORMATS[label][1], path)
+
+
 def open_image(path):
-    """Return (kind, handle, width, height, format). `kind` is "pillow" or "magick"."""
+    """Read an image's header: (kind, handle, width, height, format, frames).
+
+    `kind` is "pillow" or "magick". No pixels are decoded: `decode` does that,
+    once the size is known to be safe.
+    """
+    try:
+        label = sniff_file(path)
+    except OSError as problem:
+        fail("cannot read the image: %s" % problem.strerror)
+
+    if label is None:
+        fail(UNSUPPORTED)
+
     if HAVE_PILLOW:
+        image = None
+
         try:
-            image = Image.open(path)
-            image.load()
-            format_name = image.format
-            image = ImageOps.exif_transpose(image)
-            return "pillow", image, image.width, image.height, format_name
+            image = Image.open(path, formats=FORMATS[label][0])
+        except (Image.DecompressionBombError, Image.DecompressionBombWarning):
+            fail("the image is too large (more than %d million pixels)" % (MAX_PIXELS // 1_000_000))
         except Exception:
-            pass  # a format Pillow lacks: try ImageMagick
+            pass  # a plugin Pillow was built without (WebP, say): try ImageMagick
+
+        if image is not None:
+            # Before exif_transpose, which returns a copy with only one frame.
+            try:
+                frames = getattr(image, "n_frames", 1)
+            except Exception:
+                frames = 1  # a damaged animation: its first frame may still show
+
+            width, height = image.size
+
+            try:
+                if image.getexif().get(0x0112) in (5, 6, 7, 8):
+                    width, height = height, width
+            except Exception:
+                pass  # unreadable EXIF: draw it as it is stored
+
+            check_size(width, height)
+            return "pillow", image, width, height, image.format, frames
 
     tool = magick()
 
     if tool is None:
         if HAVE_PILLOW:
-            fail("this image format is not supported (is it an image?)")
+            fail("this image cannot be decoded (is it damaged?)")
 
         fail("no image decoder: run `python3 -m pip install Pillow` or install ImageMagick")
 
     command = [tool, "identify"] if os.path.basename(tool) == "magick" else ["identify"]
-    result = subprocess.run(
-        command + ["-format", "%w %h %m", path + "[0]"], capture_output=True, text=True, timeout=30
-    )
+    # -ping reads the header only. -auto-orient does nothing without pixels, so a
+    # quarter turn is read from the orientation and the size swapped here, to
+    # match what `convert -auto-orient` produces.
+    source = magick_source(path, label)[: -len("[0]")]  # every frame, to count them
 
     try:
-        fields = result.stdout.split()
-        width, height = int(fields[0]), int(fields[1])
-        format_name = fields[2]
-    except (ValueError, IndexError):
-        fail("this image format is not supported (is it an image?)")
+        result = subprocess.run(
+            command + MAGICK_LIMITS + ["-ping", "-format", "%w %h %[orientation]\n", source],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        lines = [line.split() for line in result.stdout.splitlines() if line.strip()]
+        width, height = int(lines[0][0]), int(lines[0][1])
+    except (ValueError, IndexError, OSError, subprocess.TimeoutExpired):
+        fail("this image cannot be decoded (is it damaged?)")
 
-    return "magick", path, width, height, format_name
+    if len(lines[0]) > 2 and lines[0][2] in QUARTER_TURNS:
+        width, height = height, width
+
+    check_size(width, height)
+    return "magick", path, width, height, label, len(lines)
+
+
+def to_eight_bit(image):
+    """Grey of 16 or 32 bits, or of floats, as 8-bit grey.
+
+    convert("L") clips such values at 255, so mid grey would come out white.
+    """
+    if image.mode.startswith("I;16"):
+        image, top = image.convert("I"), 65535
+    else:
+        _, high = image.getextrema()
+
+        if image.mode == "F" and high <= 1:
+            top = 1  # floats from 0 to 1
+        elif high <= 255:
+            top = 255
+        elif high <= 65535:
+            top = 65535  # 16-bit samples in a 32-bit image
+        else:
+            top = high
+
+    return image.point(lambda value: value * (255 / top)).convert("L")
+
+
+def decode(kind, handle, width, height):
+    """The first frame, upright and in RGBA, decoded once for all the sizes a command needs.
+
+    `width` by `height` is the largest size it will be scaled to. A JPEG much
+    larger than that is decoded at a half, a quarter or an eighth of its size,
+    which is far quicker and needs far less memory.
+    """
+    if kind != "pillow":
+        return handle  # ImageMagick reads the file for each size
+
+    image = handle
+
+    if getattr(image, "n_frames", 1) > 1:
+        image.seek(0)
+
+    if image.format in ("JPEG", "MPO"):
+        side = max(1, round(max(width, height)))  # a square: the EXIF turn is not applied yet
+        image.draft(image.mode, (side, side))
+
+    image.load()
+    image = ImageOps.exif_transpose(image)
+
+    if image.mode in ("I", "F") or image.mode.startswith("I;16"):
+        image = to_eight_bit(image)
+
+    return image.convert("RGBA")
 
 
 def resized_rgba(kind, handle, width, height):
-    """Return the image scaled to exactly width by height, as RGBA bytes."""
+    """Return the image scaled to exactly width by height, as RGBA bytes.
+
+    For Pillow, `handle` is what `decode` returned.
+    """
     if kind == "pillow":
-        image = handle
+        return handle.resize((width, height), Image.Resampling.LANCZOS).tobytes()
 
-        if getattr(image, "n_frames", 1) > 1:
-            image.seek(0)
+    path, label = handle, sniff_file(handle)
 
-        if image.mode == "P" or image.mode == "LA" or image.mode == "PA":
-            image = image.convert("RGBA")
-
-        image = image.convert("RGBA")
-        resample = Image.Resampling.LANCZOS
-        scaled = image.resize((width, height), resample)
-        return scaled.tobytes()
+    if label is None:
+        fail(UNSUPPORTED)
 
     tool = magick()
     command = [tool] if os.path.basename(tool) == "magick" else ["convert"]
     result = subprocess.run(
         command
-        + [handle + "[0]", "-auto-orient", "-resize", "%dx%d!" % (width, height), "-depth", "8", "rgba:-"],
+        + MAGICK_LIMITS
+        + [magick_source(path, label), "-auto-orient", "-resize", "%dx%d!" % (width, height), "-depth", "8", "rgba:-"],
         capture_output=True,
         timeout=60,
     )
@@ -194,12 +467,38 @@ def pack(red, green, blue):
     return (red << 16) | (green << 8) | blue
 
 
-def quantise(pixels, width, height, size):
-    """Return `size` representative colours for the image (median cut)."""
+def blend(red, green, blue, alpha, background):
+    """A part-transparent colour over the background, as the terminal would show it."""
+    mix = alpha / 255
+
+    return (
+        round(red * mix + background[0] * (1 - mix)),
+        round(green * mix + background[1] * (1 - mix)),
+        round(blue * mix + background[2] * (1 - mix)),
+    )
+
+
+def quantise(pixels, width, height, size, background=(32, 32, 32)):
+    """Return `size` representative colours for the image (median cut).
+
+    Only the colours that are painted count: see-through pixels keep the
+    terminal's own background, and would only waste entries of the palette.
+    """
     if not HAVE_PILLOW or size <= 0:
         return None
 
-    flat = Image.frombytes("RGBA", (width, height), pixels).convert("RGB")
+    painted = bytearray()
+
+    for at in range(0, width * height * 4, 4):
+        red, green, blue, alpha = pixels[at : at + 4]
+
+        if alpha >= SEE_THROUGH_ALPHA:
+            painted.extend((red, green, blue) if alpha == 255 else blend(red, green, blue, alpha, background))
+
+    if not painted:
+        return None
+
+    flat = Image.frombytes("RGB", (len(painted) // 3, 1), bytes(painted))
     reduced = flat.quantize(colors=size, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
     table = reduced.getpalette()[: size * 3]
 
@@ -215,8 +514,9 @@ def build_cells(pixels, columns, rows, background, palette_size, marker=None):
     clear them.
     """
     width = columns * 2
-    palette = quantise(pixels, width, rows * 2, palette_size)
+    palette = quantise(pixels, width, rows * 2, palette_size, background)
     snapped = {}
+    glyphs = {}  # most pictures repeat blocks: each is worked out once
 
     def snap(colour):
         if palette is None:
@@ -234,29 +534,38 @@ def build_cells(pixels, columns, rows, background, palette_size, marker=None):
 
         return found
 
+    def colour_at(at):
+        red, green, blue, alpha = pixels[at : at + 4]
+
+        if alpha < SEE_THROUGH_ALPHA:
+            return None  # see-through: the terminal's own background
+
+        if alpha < 255:
+            return blend(red, green, blue, alpha, background)
+
+        return (red, green, blue)
+
     words = array("I")
+    stride = width * 4
 
     for row in range(rows):
+        top = row * 2 * stride
+
         for column in range(columns):
-            block = []
+            at = top + column * 8
+            block = (colour_at(at), colour_at(at + 4), colour_at(at + stride), colour_at(at + stride + 4))
 
-            for dy in (0, 1):
-                for dx in (0, 1):
-                    at = ((row * 2 + dy) * width + column * 2 + dx) * 4
-                    red, green, blue, alpha = pixels[at : at + 4]
+            if block[0] == block[1] == block[2] == block[3]:
+                # One colour, or none: what best_glyph picks for it, without the search.
+                glyph, fg, bg = " ", block[0], block[0]
+            else:
+                found = glyphs.get(block)
 
-                    if alpha < 24:
-                        block.append(None)  # see-through: the terminal's own background
-                    else:
-                        if alpha < 255:
-                            mix = alpha / 255
-                            red = round(red * mix + background[0] * (1 - mix))
-                            green = round(green * mix + background[1] * (1 - mix))
-                            blue = round(blue * mix + background[2] * (1 - mix))
+                if found is None:
+                    found = glyphs[block] = best_glyph(block)
 
-                        block.append((red, green, blue))
+                glyph, fg, bg = found
 
-            glyph, fg, bg = best_glyph(block)
             fg = DEFAULT_COLOUR if fg is None else pack(*snap(fg))
             bg = DEFAULT_COLOUR if bg is None else pack(*snap(bg))
             code = ord(glyph)
@@ -338,10 +647,25 @@ def read_stored(path):
     if not os.path.isfile(path):
         fail("the stored image is gone")
 
+    try:
+        os.utime(path)  # in use: a prune must keep it
+    except OSError:
+        pass  # not ours to touch: it is still read
+
     return open_image(path)
 
 
-EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif", "WEBP": ".webp", "BMP": ".bmp", "TIFF": ".tiff", "ICO": ".ico"}
+def extension_for(format_name, label):
+    """The file extension for a format, so that a click opens the system's viewer."""
+    found = EXTENSIONS.get(str(format_name).upper())
+
+    if found is None and HAVE_PILLOW:
+        found = next(
+            (extension for extension, name in Image.registered_extensions().items() if name == str(format_name).upper()),
+            None,
+        )
+
+    return found or EXTENSIONS.get(label) or ".img"
 
 
 def store_image(data):
@@ -356,36 +680,47 @@ def store_image(data):
     if len(data) > MAX_BYTES:
         fail("the image is larger than %d MB" % (MAX_BYTES // 1024 // 1024))
 
+    label = sniff(data[:16])
+
+    if label is None:
+        fail(UNSUPPORTED)  # before anything is written or decoded
+
     directory = cache_dir()
     name = hashlib.sha256(data).hexdigest()[:24]
 
     # The cache is keyed by content: an image stored before is used as it is.
-    for extension in set(EXTENSIONS.values()) | {".img"}:
+    for extension in sorted(set(EXTENSIONS.values()) | {".img"}):
         known = os.path.join(directory, name + extension)
 
-        if os.path.isfile(known) and os.path.getsize(known) == len(data):
-            os.utime(known)  # touched, so a prune keeps it
-            return describe_stored(known)
+        try:
+            if os.path.isfile(known) and os.path.getsize(known) == len(data):
+                os.utime(known)  # touched, so a prune keeps it
+                return describe_stored(known)
+        except OSError:
+            pass  # pruned by another process just now: store it again
 
-    path = os.path.join(directory, name + ".img")
+    # A file of its own, under a name no other process uses, until it is known
+    # to be an image: then it takes its final name in one step.
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix="." + name + ".", suffix=".part")
 
-    with open(path, "wb") as handle:
-        handle.write(data)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
 
-    described = describe_stored(path)
-    extension = EXTENSIONS.get(str(described["format"]).upper())
-
-    if extension is not None:
-        named = os.path.join(directory, name + extension)
-        os.replace(path, named)
-        described["path"] = named
+        described = describe_stored(temporary)
+        path = os.path.join(directory, name + extension_for(described["format"], label))
+        os.replace(temporary, path)
+        described["path"] = path
+    finally:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)  # still there only when it was not an image
 
     return described
 
 
 def describe_stored(path):
-    kind, image, width, height, format_name = open_image(path)
-    frames = getattr(image, "n_frames", 1) if kind == "pillow" else 1
+    """What `inspect` reports. Only the header is read: no pixels are decoded."""
+    kind, image, width, height, format_name, frames = open_image(path)
 
     return {
         "ok": True,
@@ -420,38 +755,84 @@ def command_inspect(arguments):
     described = store_image(data)
 
     if arguments.name:
-        described["named"] = named_copy(described["path"], arguments.name)
+        named = named_copy(described["path"], arguments.name)
+
+        if named is not None:
+            described["named"] = named
 
     print(json.dumps(described))
 
 
+# Characters that must not reach a file name a viewer shows in its title bar:
+# controls, and format characters, which include the bidi overrides that make
+# "photo‮gnp.exe" read as "photoexe.png".
+HIDDEN_CATEGORIES = ("Cc", "Cf")
+MAX_NAME_BYTES = 200  # file systems allow 255 bytes, and the extension may follow
+
+
+def clean_name(name):
+    """A file name from the name its sender gave, safe to show and to create."""
+    base = os.path.basename(name.replace("\\", "/"))
+    base = "".join(character for character in base if unicodedata.category(character) not in HIDDEN_CATEGORIES)
+    base = "".join(character if character.isprintable() and character not in "/:" else "_" for character in base)
+    base = base.strip()
+    # Bytes, not characters: 200 characters of most scripts are far more than 255 bytes.
+    base = base.encode("utf-8")[:MAX_NAME_BYTES].decode("utf-8", "ignore").strip()
+
+    return base if base not in ("", ".", "..") else "image"
+
+
 def named_copy(path, name):
-    """A link to a stored image under the name its sender gave, for the viewer's title bar."""
-    base = os.path.basename(name.replace("\\", "/")).strip() or "image"
-    base = "".join(character if character.isprintable() and character not in "/:" else "_" for character in base)[:120]
+    """A link to a stored image under the name its sender gave, for the viewer's title bar.
+
+    None when it cannot be made: the picture still shows, only its title is lost.
+    """
+    base = clean_name(name)
     extension = os.path.splitext(path)[1]
 
     if extension and not base.lower().endswith(extension) and not (extension == ".jpg" and base.lower().endswith(".jpeg")):
         base += extension
 
-    folder = os.path.join(cache_dir(), "named", os.path.splitext(os.path.basename(path))[0])
-    os.makedirs(folder, mode=0o700, exist_ok=True)
-    target = os.path.join(folder, base)
+    try:
+        named = os.path.join(cache_dir(), "named")
+        os.makedirs(named, mode=0o700, exist_ok=True)
+        folder = os.path.join(named, os.path.splitext(os.path.basename(path))[0])
+        os.makedirs(folder, mode=0o700, exist_ok=True)
+        target = os.path.join(folder, base)
 
-    if os.path.exists(target) and not os.path.samefile(target, path):
-        os.remove(target)  # a link to an older copy
+        if os.path.exists(target) and os.path.samefile(target, path):
+            return target
 
-    if not os.path.exists(target):
+        # A link under a name of its own, which then takes the name in one step:
+        # another process may be making the same link at the same time.
+        temporary = os.path.join(folder, ".%s.part" % secrets.token_hex(8))
+
         try:
-            os.link(path, target)
+            os.link(path, temporary)
+            os.replace(temporary, target)
         except OSError:
-            shutil.copyfile(path, target)
+            with open(path, "rb") as handle:
+                write_atomic(target, handle.read())
+        finally:
+            # A rename onto another link of the same file does nothing and
+            # leaves the temporary name behind: it goes here.
+            with contextlib.suppress(OSError):
+                os.remove(temporary)
 
-    return target
+        return target
+    except (OSError, UnsafeCache):
+        return None
 
 
 ESC_BYTE = b"\x1b"
-TMUX = re.compile(rb"\x1bPtmux;((?:[^\x1b]|\x1b\x1b)*)\x1b\\")
+TMUX_START = b"\x1bPtmux;"
+# A tmux DCS passthrough: ESC P tmux ; <body with every ESC doubled> ESC \.
+# Unrolled ("normal* (special normal*)*"), so a long body with no end costs
+# linear time; the form (?:[^ESC]|ESC ESC)* backtracks one byte at a time.
+TMUX = re.compile(rb"\x1bPtmux;([^\x1b]*(?:\x1b\x1b[^\x1b]*)*)\x1b\\")
+# The TypeScript parser (hooks/osc1337.ts) also takes the 8-bit ST, U+009C. It
+# reads decoded text; this reads bytes, and in UTF-8 the byte 0x9c is part of
+# many ordinary characters (a continuation byte), so it cannot end a sequence here.
 SEQUENCE = re.compile(rb"\x1b\]1337;(File|MultipartFile|FilePart|FileEnd)(?:=([^\x07\x1b]*))?(?:\x07|\x1b\\)")
 MAX_SCANNED = 512 * 1024 * 1024
 MAX_IMAGES = 16
@@ -467,7 +848,9 @@ def command_scan(arguments):
     with open(arguments.path, "rb") as handle:
         text = handle.read()
 
-    text = TMUX.sub(lambda match: match.group(1).replace(b"\x1b\x1b", ESC_BYTE), text)
+    if TMUX_START in text:
+        text = TMUX.sub(lambda match: match.group(1).replace(b"\x1b\x1b", ESC_BYTE), text)
+
     found = []
     pending = None
 
@@ -481,7 +864,9 @@ def command_scan(arguments):
 
         if len(found) < MAX_IMAGES and data:
             try:
-                stored = store_image(data)
+                # Quietly: a picture that will not decode prints no reply of its own.
+                with contextlib.redirect_stdout(io.StringIO()):
+                    stored = store_image(data)
             except SystemExit:
                 return  # one picture that will not decode must not hide the others
 
@@ -490,9 +875,12 @@ def command_scan(arguments):
 
             if name:
                 try:
-                    stored["named"] = named_copy(stored["path"], base64.b64decode(name).decode("utf-8", "replace"))
-                except (binascii.Error, ValueError, OSError):
-                    pass  # the picture still shows; only its title is lost
+                    named = named_copy(stored["path"], base64.b64decode(name).decode("utf-8", "replace"))
+                except (binascii.Error, ValueError):
+                    named = None  # the picture still shows; only its title is lost
+
+                if named is not None:
+                    stored["named"] = named
 
             found.append(stored)
 
@@ -516,14 +904,28 @@ def command_scan(arguments):
     print(json.dumps({"ok": True, "images": found}))
 
 
+MAX_ANCESTORS = 12
+CELL_SECONDS = 5  # for the whole walk: a slow `ps` must not hold up a preview
+
+
 def tty_of_ancestors():
     """The first terminal device that this process or one of its parents has."""
     pid = os.getpid()
+    deadline = time.monotonic() + CELL_SECONDS
 
-    for _ in range(12):
-        result = subprocess.run(
-            ["ps", "-o", "ppid=,tty=", "-p", str(pid)], capture_output=True, text=True, timeout=5
-        )
+    for _ in range(MAX_ANCESTORS):
+        left = deadline - time.monotonic()
+
+        if left <= 0:
+            return None
+
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "ppid=,tty=", "-p", str(pid)], capture_output=True, text=True, timeout=min(5, left)
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+
         fields = result.stdout.split()
 
         if len(fields) < 2:
@@ -534,7 +936,10 @@ def tty_of_ancestors():
         if tty not in ("??", "?", "-"):
             return tty if tty.startswith("/dev/") else "/dev/" + tty
 
-        pid = int(parent)
+        try:
+            pid = int(parent)
+        except ValueError:
+            return None
 
         if pid <= 1:
             return None
@@ -573,7 +978,10 @@ def parse_background(text):
     if len(text) != 6:
         return (32, 32, 32)
 
-    return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    try:
+        return (int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16))
+    except ValueError:
+        return (32, 32, 32)
 
 
 def place(kind, image, width, height, grid_width, grid_height, sub_width, sub_height, stretch):
@@ -606,9 +1014,23 @@ def place(kind, image, width, height, grid_width, grid_height, sub_width, sub_he
     return bytes(canvas)
 
 
+def box_pixels(arguments):
+    """The box in device pixels, at twice the cell size for a sharp picture on a dense screen."""
+    return arguments.columns * arguments.cell_width * 2, arguments.rows * arguments.cell_height * 2
+
+
+def check_box(arguments):
+    if arguments.columns < 1 or arguments.rows < 1 or arguments.cell_width <= 0 or arguments.cell_height <= 0:
+        fail("the box must be at least one cell, and a cell more than zero pixels")
+
+
 def command_cells(arguments):
-    kind, image, width, height, _ = read_stored(arguments.path)
+    check_box(arguments)
+    kind, image, width, height, _, _ = read_stored(arguments.path)
     grid_width, grid_height = arguments.columns * 2, arguments.rows * 2
+    with_marker = arguments.marker and arguments.columns >= MARKER_CELLS
+    largest = box_pixels(arguments) if with_marker else (grid_width, grid_height)
+    image = decode(kind, image, *largest)
     pixels = place(
         kind, image, width, height, grid_width, grid_height,
         arguments.cell_width / 2, arguments.cell_height / 2, arguments.stretch,
@@ -616,9 +1038,9 @@ def command_cells(arguments):
     marker = None
     png = None
 
-    if arguments.marker and arguments.columns >= MARKER_CELLS:
+    if with_marker:
         png, _, _ = write_box_png(kind, image, width, height, arguments)
-        marker = overlay_marker(png, arguments.columns, arguments.rows)
+        marker = overlay_marker(png, arguments)
 
     background = parse_background(arguments.background)
     cells = build_cells(pixels, arguments.columns, arguments.rows, background, arguments.palette, marker)
@@ -637,9 +1059,24 @@ def overlay_dir():
     return path
 
 
-def overlay_marker(png, columns, rows):
-    """The three bytes that name one box: its picture and its size."""
-    return hashlib.sha256(("%s:%d:%d" % (png, columns, rows)).encode()).digest()[:3]
+def overlay_marker(png, arguments):
+    """The three bytes that name one box: its picture, its size and how it was drawn.
+
+    The cell size, stretch, palette and background change the PNG or the glyphs,
+    so a box drawn after a change of font size never reuses an old record.
+    """
+    key = "%s:%d:%d:%r:%r:%d:%d:%s" % (
+        png,
+        arguments.columns,
+        arguments.rows,
+        float(arguments.cell_width),
+        float(arguments.cell_height),
+        bool(arguments.stretch),
+        getattr(arguments, "palette", 0),
+        getattr(arguments, "background", ""),
+    )
+
+    return hashlib.sha256(key.encode()).digest()[:3]
 
 
 def register_overlay(marker, png, columns, rows, cells):
@@ -651,46 +1088,86 @@ def register_overlay(marker, png, columns, rows, cells):
 
     glyphs = "".join(chr(words[index]) for index in range(0, len(words), 3))
     record = {"png": png, "columns": columns, "rows": rows, "glyphs": glyphs}
+    write_atomic(os.path.join(overlay_dir(), marker.hex() + ".json"), json.dumps(record).encode())
 
-    with open(os.path.join(overlay_dir(), marker.hex() + ".json"), "w") as handle:
-        json.dump(record, handle)
+
+def nearest(pixels, width, height, out_width, out_height):
+    """RGBA bytes scaled by repeating pixels: no new colours, no blur."""
+    if HAVE_PILLOW:
+        picture = Image.frombytes("RGBA", (width, height), pixels)
+        return picture.resize((out_width, out_height), Image.Resampling.NEAREST).tobytes()
+
+    # One 32-bit word per pixel, so a row is copied a word at a time.
+    words = array("I")
+    words.frombytes(pixels)
+    # The source pixel under the centre of each new one, as Pillow picks it.
+    columns = [(2 * x + 1) * width // (2 * out_width) for x in range(out_width)]
+    out = array("I")
+
+    for y in range(out_height):
+        source = (2 * y + 1) * height // (2 * out_height) * width
+        out.extend(array("I", [words[source + x] for x in columns]))
+
+    return out.tobytes()
 
 
 def write_box_png(kind, image, width, height, arguments):
-    """A PNG with the exact shape of the box, the picture centred in it."""
-    # The box in device pixels, at twice the cell size for a sharp picture on a dense screen.
-    box_width = arguments.columns * arguments.cell_width * 2
-    box_height = arguments.rows * arguments.cell_height * 2
+    """A PNG with the exact shape of the box, the picture centred in it.
+
+    For Pillow, `image` is what `decode` returned.
+    """
+    box_width, box_height = box_pixels(arguments)
     fit = min(box_width / width, box_height / height)
     # Never enlarge: a small picture keeps its pixels and the margin grows instead.
     out_width = max(1, round(box_width * min(1, fit) / fit))
     out_height = max(1, round(box_height * min(1, fit) / fit))
 
     if arguments.stretch:
-        out_width, out_height = min(width, round(box_width)), min(height, round(box_height))
+        out_width, out_height = max(1, min(width, round(box_width))), max(1, min(height, round(box_height)))
         pixels = resized_rgba(kind, image, out_width, out_height)
     else:
         pixels = place(kind, image, width, height, out_width, out_height, 1, 1, False)
 
-    out_path = "%s.%dx%d.png" % (os.path.splitext(arguments.path)[0], arguments.columns, arguments.rows)
+    # iterm_overlay.py cuts the PNG into rows of cells. A height that is a
+    # multiple of the rows gives every row the same whole number of pixels: no
+    # empty row for a tiny picture, and no seam of one pixel between rows.
+    if out_height % arguments.rows:
+        taller = arguments.rows * -(-out_height // arguments.rows)
+        wider = max(1, round(out_width * taller / out_height))
+        pixels = nearest(pixels, out_width, out_height, wider, taller)
+        out_width, out_height = wider, taller
+
+    # The name carries how the box was drawn: a new font size is a new file.
+    out_path = "%s.%dx%d.%gx%g%s.png" % (
+        os.path.splitext(arguments.path)[0],
+        arguments.columns,
+        arguments.rows,
+        arguments.cell_width,
+        arguments.cell_height,
+        ".stretch" if arguments.stretch else "",
+    )
 
     if HAVE_PILLOW:
-        Image.frombytes("RGBA", (out_width, out_height), pixels).save(out_path, "PNG")
+        out = io.BytesIO()
+        Image.frombytes("RGBA", (out_width, out_height), pixels).save(out, "PNG")
+        write_atomic(out_path, out.getvalue())
     else:
-        write_png(out_path, out_width, out_height, pixels)
+        write_atomic(out_path, png_bytes(out_width, out_height, pixels))
 
     return out_path, out_width, out_height
 
 
 def command_png(arguments):
-    kind, image, width, height, _ = read_stored(arguments.path)
+    check_box(arguments)
+    kind, image, width, height, _, _ = read_stored(arguments.path)
+    image = decode(kind, image, *box_pixels(arguments))
     out_path, out_width, out_height = write_box_png(kind, image, width, height, arguments)
 
     print(json.dumps({"ok": True, "path": out_path, "width": out_width, "height": out_height}))
 
 
-def write_png(path, width, height, rgba):
-    """A minimal PNG writer, for a machine with ImageMagick and no Pillow."""
+def png_bytes(width, height, rgba):
+    """A minimal PNG encoder, for a machine with ImageMagick and no Pillow."""
     import zlib
 
     def chunk(tag, body):
@@ -699,11 +1176,12 @@ def write_png(path, width, height, rgba):
 
     raw = b"".join(b"\x00" + rgba[y * width * 4 : (y + 1) * width * 4] for y in range(height))
 
-    with open(path, "wb") as handle:
-        handle.write(b"\x89PNG\r\n\x1a\n")
-        handle.write(chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)))
-        handle.write(chunk(b"IDAT", zlib.compress(raw, 6)))
-        handle.write(chunk(b"IEND", b""))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(raw, 6))
+        + chunk(b"IEND", b"")
+    )
 
 
 def main():
@@ -748,6 +1226,8 @@ def main():
         arguments.run(arguments)
     except SystemExit:
         raise
+    except UnsafeCache as problem:
+        fail(str(problem))
     except Exception as problem:  # one clear line beats a traceback in a terminal row
         fail("%s: %s" % (type(problem).__name__, problem))
 

@@ -3,6 +3,8 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   caption,
   deliveredImages,
+  imageKey,
+  Lru,
   drawsPixels,
   outputText,
   overlayMessages,
@@ -142,8 +144,10 @@ describe('withoutImages', () => {
     expect(withoutImages(`made it\n${legacy}`)).toBe('made it\n\n')
   })
 
-  test('data cut off by a size limit is still an image', () => {
-    expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`)).toBe('(inline image)')
+  test('data cut off by a size limit counts as what the caller says it drew', () => {
+    expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`, 1)).toBe('(inline image)')
+    expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`, 3)).toBe('(3 inline images)')
+    expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`)).toBe('')
   })
 })
 
@@ -164,5 +168,40 @@ describe('deliveredImages', () => {
     expect(deliveredImages({ stdout: 'x' })).toEqual([])
     expect(deliveredImages('text')).toEqual([])
     expect(deliveredImages({ attachments: 'no' })).toEqual([])
+  })
+})
+
+describe('imageKey', () => {
+  test('images that share a length, a start and an end still differ', () => {
+    const start = 'A'.repeat(100)
+    const end = 'Z'.repeat(100)
+
+    expect(imageKey(`${start}one${end}`)).not.toBe(imageKey(`${start}two${end}`))
+    expect(imageKey('abc')).toBe(imageKey('abc'))
+  })
+})
+
+describe('Lru', () => {
+  test('keeps the most recently used entries', () => {
+    const cache = new Lru<string, number>(2)
+    cache.set('a', 1)
+    cache.set('b', 2)
+    cache.get('a')
+    cache.set('c', 3)
+
+    expect(cache.get('b')).toBeUndefined()
+    expect(cache.get('a')).toBe(1)
+    expect(cache.get('c')).toBe(3)
+    expect(cache.size).toBe(2)
+  })
+})
+
+describe('options, rounded', () => {
+  test('a fractional palette or size becomes a whole number', () => {
+    expect(readOptions({ palette: 32.5, max_columns: 40.4, max_rows: 9.6 }, '/m')).toMatchObject({
+      palette: 33,
+      maxColumns: 40,
+      maxRows: 10,
+    })
   })
 })

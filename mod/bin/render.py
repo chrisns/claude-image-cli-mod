@@ -92,17 +92,24 @@ def cache_dir():
 
 
 def prune(directory):
-    """Remove cached files nobody has touched for a day."""
+    """Remove cached files nobody has touched for a day, and folders left empty."""
     cutoff = time.time() - MAX_AGE_SECONDS
 
-    for name in os.listdir(directory):
-        path = os.path.join(directory, name)
+    for folder, _, names in os.walk(directory, topdown=False):
+        for name in names:
+            path = os.path.join(folder, name)
 
-        try:
-            if os.path.getmtime(path) < cutoff:
-                os.remove(path)
-        except OSError:
-            pass
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+            except OSError:
+                pass
+
+        if folder != directory:
+            try:
+                os.rmdir(folder)  # only succeeds when it is empty
+            except OSError:
+                pass
 
 
 def magick():
@@ -334,8 +341,15 @@ def read_stored(path):
     return open_image(path)
 
 
+EXTENSIONS = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif", "WEBP": ".webp", "BMP": ".bmp", "TIFF": ".tiff", "ICO": ".ico"}
+
+
 def store_image(data):
-    """Keep the bytes of one image in the cache and describe it."""
+    """Keep the bytes of one image in the cache and describe it.
+
+    The file gets the extension of its format, so that a click can open it in
+    the system's own viewer.
+    """
     if not data:
         fail("the image data is empty")
 
@@ -349,7 +363,15 @@ def store_image(data):
     with open(path, "wb") as handle:
         handle.write(data)
 
-    return describe_stored(path)
+    described = describe_stored(path)
+    extension = EXTENSIONS.get(str(described["format"]).upper())
+
+    if extension is not None:
+        named = os.path.join(directory, name + extension)
+        os.replace(path, named)
+        described["path"] = named
+
+    return described
 
 
 def describe_stored(path):
@@ -369,7 +391,6 @@ def describe_stored(path):
 
 def command_inspect(arguments):
     prune(cache_dir())
-    prune(overlay_dir())
 
     if arguments.file:
         # A file on disk, delivered as it is: read it, no base64 on the way.
@@ -387,7 +408,34 @@ def command_inspect(arguments):
         except (binascii.Error, UnicodeEncodeError):
             fail("the image data is not base64")
 
-    print(json.dumps(store_image(data)))
+    described = store_image(data)
+
+    if arguments.name:
+        described["named"] = named_copy(described["path"], arguments.name)
+
+    print(json.dumps(described))
+
+
+def named_copy(path, name):
+    """A link to a stored image under the name its sender gave, for the viewer's title bar."""
+    base = os.path.basename(name.replace("\\", "/")).strip() or "image"
+    base = "".join(character if character.isprintable() and character not in "/:" else "_" for character in base)[:120]
+    extension = os.path.splitext(path)[1]
+
+    if extension and not base.lower().endswith(extension) and not (extension == ".jpg" and base.lower().endswith(".jpeg")):
+        base += extension
+
+    folder = os.path.join(cache_dir(), "named", os.path.splitext(os.path.basename(path))[0])
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    target = os.path.join(folder, base)
+
+    if not os.path.exists(target):
+        try:
+            os.link(path, target)
+        except OSError:
+            shutil.copyfile(path, target)
+
+    return target
 
 
 ESC_BYTE = b"\x1b"
@@ -426,6 +474,14 @@ def command_scan(arguments):
                 return  # one picture that will not decode must not hide the others
 
             stored["args"] = args
+            name = dict(pair.split("=", 1) for pair in args.split(";") if "=" in pair).get("name")
+
+            if name:
+                try:
+                    stored["named"] = named_copy(stored["path"], base64.b64decode(name).decode("utf-8", "replace"))
+                except (binascii.Error, ValueError, OSError):
+                    pass  # the picture still shows; only its title is lost
+
             found.append(stored)
 
     for match in SEQUENCE.finditer(text):
@@ -644,6 +700,7 @@ def main():
 
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--file", help="read the image from this file, not base64 from stdin")
+    inspect.add_argument("--name", help="also link the image under this file name, for a viewer to show")
     inspect.set_defaults(run=command_inspect)
 
     commands.add_parser("cell").set_defaults(run=command_cell)

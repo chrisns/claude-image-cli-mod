@@ -168,6 +168,27 @@ class RenderTests(unittest.TestCase):
         self.assertEqual([image["width"] for image in reply["images"]], [10, 10])
         self.assertEqual(reply["images"][0]["args"], "inline=1;name=YS5wbmc=")
 
+    def test_inspect_reads_a_file_and_names_a_link(self):
+        path = tempfile.mktemp(suffix=".png")
+        Image.new("RGB", (6, 4), (1, 2, 3)).save(path)
+        code, reply = run("inspect", "--file", path, "--name", "some/dir/holiday photo")
+        os.remove(path)
+        self.assertEqual(code, 0, reply)
+        self.assertTrue(reply["path"].endswith(".png"))  # an extension, so a viewer opens it
+        self.assertEqual(os.path.basename(reply["named"]), "holiday photo.png")
+        self.assertTrue(os.path.samefile(reply["path"], reply["named"]))
+
+    def test_a_name_cannot_leave_the_cache(self):
+        code, reply = run("inspect", "--name", "../../../etc/passwd", stdin=png_base64(2, 2, (0, 0, 0, 255)))
+        self.assertEqual(code, 0, reply)
+        self.assertEqual(os.path.basename(reply["named"]), "passwd.png")
+        self.assertIn(os.sep + "named" + os.sep, reply["named"])
+
+    def test_inspect_says_why_a_file_cannot_be_read(self):
+        code, reply = run("inspect", "--file", "/nonexistent/picture.jpg")
+        self.assertNotEqual(code, 0)
+        self.assertIn("cannot read", reply["error"])
+
     def test_a_missing_file_is_an_error_not_a_traceback(self):
         code, reply = run("cells", "/nonexistent/file.img", "--columns", "2", "--rows", "2")
         self.assertNotEqual(code, 0)

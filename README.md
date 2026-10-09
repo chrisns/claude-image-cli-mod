@@ -14,6 +14,7 @@ The picture above is a NASA photo of the Earth. It is a real iTerm2 inline image
 
 - It draws each image under the tool call that printed it.
 - It draws image files that Claude delivers to you with `SendUserFile` or `SendUserMessage`.
+- Click a picture to open it in your system's own viewer, for example Preview on macOS. Where the terminal sends no clicks to Claude Code, Cmd+click the caption: it is a `file://` link.
 - It opens the "Ran 1 shell command" group when the group holds an image.
 - It removes the base64 from what the model reads. A 1 MB image is about 1.3 million characters.
 - It reads output that Claude Code cut at 30,000 characters, so large images work.
@@ -112,8 +113,9 @@ Change them in the config menu of Claude Code, or under `pluginConfigs` in your 
 2. `mod/hooks/osc1337.ts` reads the sequences: `File=`, the chunked `MultipartFile`, `FilePart` and `FileEnd` that `imgcat` 3 uses, both terminators (`BEL` and `ESC \`), and the tmux passthrough wrapper.
 3. If Claude Code saved a large output to a file, `mod/bin/render.py scan` reads the file. The sandbox of a mod can read at most 4 MiB.
 4. `mod/bin/render.py` decodes the image, scales it to the box and builds the cells. It picks the best of 8 quadrant glyphs for each cell. It finds the real cell size with `TIOCGWINSZ` on the terminal of the parent process.
-5. In iTerm2, `mod/bin/iterm_overlay.py` draws the real image over the preview. See [Real pixels in iTerm2](#real-pixels-in-iterm2).
-6. A `session.append` hook removes the data from the tool result that the model reads. The transcript keeps the whole output, so the preview comes back after a resume.
+5. A transparent `Client` region (`mod/hooks/click.tsx`) lies over each picture. A left click inside it asks the hooks module to run `open` (or `xdg-open`) on that file. The mod opens only files that it drew. An image from `imgcat` opens from the cache, under the name that `imgcat` sent.
+6. In iTerm2, `mod/bin/iterm_overlay.py` draws the real image over the preview. See [Real pixels in iTerm2](#real-pixels-in-iterm2).
+7. A `session.append` hook removes the data from the tool result that the model reads. The transcript keeps the whole output, so the preview comes back after a resume.
 
 Decoded images are cached in a private folder under your temp directory. The mod removes files after 24 hours.
 
@@ -127,6 +129,7 @@ Decoded images are cached in a private folder under your temp directory. The mod
 - The `iterm` overlay needs the iTerm2 Python API on the machine where iTerm2 runs. Over ssh you get block previews.
 - In iTerm2, a row that Claude Code covers with a hint stays a block preview until the hint goes.
 - The overlay draws only boxes on the visible screen. iTerm2's own scrollback shows what was drawn there before.
+- A click on a picture needs Claude Code to receive mouse clicks, as it does in its fullscreen layout. Elsewhere, Cmd+click the caption.
 
 ## Develop
 

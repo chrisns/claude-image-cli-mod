@@ -6,6 +6,7 @@ import { extract, parseArguments, type InlineHead } from './osc1337.ts'
 import {
   caption,
   deliveredImages,
+  fileUrl,
   drawsPixels,
   imageKey,
   outputText,
@@ -36,6 +37,9 @@ const inspected = new Map<string, Promise<Inspected>>()
 // The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
 // Cells carry its marker only then, so a terminal without it shows no marker.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
+
+// The files a click on a preview may open: only ones this mod drew.
+const openable = new Set<string>()
 
 const hasImage = (output: unknown) => outputText(output)?.includes(']1337;') === true
 
@@ -79,6 +83,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
       found.push({
         head,
+        file: path,
         inspect: () => {
           let stored = inspected.get(path)
 
@@ -128,7 +133,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
           let stored = inspected.get(key)
 
           if (stored === undefined) {
-            stored = run<Inspected>(['inspect'], image.base64)
+            stored = run<Inspected>(['inspect', ...(image.name === '' ? [] : ['--name', image.name])], image.base64)
             inspected.set(key, stored)
             // A failure must not stick: the next draw tries again.
             stored.catch(() => inspected.delete(key))
@@ -150,13 +155,15 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     await $.env.get('TERM'),
     await $.env.get('KITTY_WINDOW_ID'),
   )
-  const { Box, Text, Raster, Image } = $.ui.resolve(e)
+  const { Box, Text, Raster, Image, Client, Link } = $.ui.resolve(e)
 
-  const draw = async ({ head, inspect }: Pic, index: number) => {
+  const draw = async ({ head, inspect, file }: Pic, index: number) => {
     let stored: Inspected | undefined
 
     try {
       stored = await inspect()
+      const opens = file ?? stored.named ?? stored.path
+      openable.add(opens)
 
       const box = fit(stored, head, {
         viewportColumns: e.viewport?.columns ?? 80,
@@ -209,8 +216,21 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
       return (
         <Box key={`inline-box-${index}`} flexDirection="column" paddingLeft={2}>
-          {picture}
-          <Text dimColor>{caption(head, stored)}</Text>
+          <Box width={box.columns} height={box.rows}>
+            {picture}
+            {/* A click on the picture opens the file in the system's own viewer. */}
+            <Box position="absolute" top={0} left={0} width={box.columns} height={box.rows}>
+              <Client
+                key={`inline-click-${index}`}
+                module="./click.tsx"
+                props={{ path: opens }}
+                width={box.columns}
+                height={box.rows}
+              />
+            </Box>
+          </Box>
+          {/* Where the terminal sends no clicks, cmd+click on the caption opens it. */}
+          <Link href={fileUrl(opens)} label={caption(head, stored)} />
         </Box>
       )
     } catch (problem) {
@@ -293,6 +313,21 @@ export const register: Register = (on, settings) => {
 
     return next(content === e.message.content ? e : { ...e, message: { ...e.message, content: [...content] } })
   }).catch(($, e, next) => next(e))
+
+  // A click on a preview: open the file in the system's own viewer (Preview on macOS).
+  on('ui.message', async ($, e, next) => {
+    const { open } = (e.data ?? {}) as { open?: unknown }
+
+    if (typeof open === 'string' && openable.has(open)) {
+      const opened = await $.process.run(['open', open]).catch(() => undefined)
+
+      if (opened === undefined || opened.exitCode !== 0) {
+        await $.process.run(['xdg-open', open]).catch(() => undefined)
+      }
+    }
+
+    return next(e)
+  })
 
   // A file delivered to the person: show the picture under the delivery.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {

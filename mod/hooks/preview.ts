@@ -17,10 +17,22 @@ export type Inspected = {
   height: number
   frames: number
   bytes: number
+  /** The stored image under the name its sender gave, when it gave one. */
+  named?: string
 }
 
 /** An image that is ready to size and draw: how the sender asked for it, and where it is stored. */
-export type Pic = { head: InlineHead; inspect: () => Promise<Inspected> }
+export type Pic = {
+  head: InlineHead
+  inspect: () => Promise<Inspected>
+  /** The file a click opens, when it is not the stored copy: a delivered file. */
+  file?: string
+}
+
+/** The file URL of a path, for a link a terminal opens. */
+export function fileUrl(path: string): string {
+  return `file://${path.split('/').map(encodeURIComponent).join('/')}`
+}
 
 
 /** Whether this terminal draws real pixels for an Image element. */

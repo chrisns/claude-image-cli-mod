@@ -358,6 +358,15 @@ def store_image(data):
 
     directory = cache_dir()
     name = hashlib.sha256(data).hexdigest()[:24]
+
+    # The cache is keyed by content: an image stored before is used as it is.
+    for extension in set(EXTENSIONS.values()) | {".img"}:
+        known = os.path.join(directory, name + extension)
+
+        if os.path.isfile(known) and os.path.getsize(known) == len(data):
+            os.utime(known)  # touched, so a prune keeps it
+            return describe_stored(known)
+
     path = os.path.join(directory, name + ".img")
 
     with open(path, "wb") as handle:
@@ -428,6 +437,9 @@ def named_copy(path, name):
     folder = os.path.join(cache_dir(), "named", os.path.splitext(os.path.basename(path))[0])
     os.makedirs(folder, mode=0o700, exist_ok=True)
     target = os.path.join(folder, base)
+
+    if os.path.exists(target) and not os.path.samefile(target, path):
+        os.remove(target)  # a link to an older copy
 
     if not os.path.exists(target):
         try:

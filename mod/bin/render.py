@@ -16,6 +16,10 @@ image decoder. Three commands, each prints one line of JSON on stdout:
   cell      Measure one terminal cell in pixels, from the window size that the
             terminal reports on the tty of this process or of a parent.
 
+`cells --marker` is for iTerm2. It hides an id in the first cells of the grid
+and keeps a PNG of the box. bin/iterm_overlay.py finds the id on the screen
+and draws that PNG over the cells with the iTerm2 inline images protocol.
+
 Pillow is the decoder. ImageMagick (`magick`) is the fallback when Pillow is
 not installed. Only the Python standard library is needed besides those.
 """
@@ -54,6 +58,26 @@ QUADRANTS = " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█"
 
 DEFAULT_COLOUR = 0x01000000  # bit 24 alone: the terminal's own colour
 SEE_THROUGH_COST = 3 * 255 * 255
+
+# The marker that iterm_overlay.py looks for, in the first cells of every row of
+# the grid: a check glyph, three glyphs for the id and one for the row. Braille,
+# because no prompt, reply or diff draws it, and each glyph is one cell wide.
+#
+# Each glyph mixes in the row number, so no marker cell is the same as the one
+# on the row above or below. When a box moves, every marker cell changes, so
+# Claude Code paints every one of them again: a terminal that repaints only the
+# cells that changed cannot leave a marker hidden under an old image.
+MARKER_CELLS = 5
+BLANK = 0x2800  # a braille cell with no dots: draws nothing, but is not a space
+
+
+def marker_glyphs(marker, row):
+    """The five glyphs of the marker of one row; iterm_overlay.py reads them back."""
+    row &= 0xFF
+    shuffled = [(byte + row * 37 + index * 11) & 0xFF for index, byte in enumerate(marker, start=1)]
+    check = (marker[0] + marker[1] + marker[2] + row * 37 + 0x5A) & 0xFF
+
+    return [BLANK + value for value in (check, *shuffled, row)]
 
 
 def fail(message, code=1):
@@ -175,8 +199,14 @@ def quantise(pixels, width, height, size):
     return [tuple(table[i : i + 3]) for i in range(0, len(table) - 2, 3)]
 
 
-def build_cells(pixels, columns, rows, background, palette_size):
-    """Pack the grid. `pixels` is RGBA, 2 * columns wide and 2 * rows tall."""
+def build_cells(pixels, columns, rows, background, palette_size, marker=None):
+    """Pack the grid. `pixels` is RGBA, 2 * columns wide and 2 * rows tall.
+
+    With a `marker` (three bytes), the first cells of each row carry it, drawn
+    in the colour of the cell so that it does not show, and see-through cells
+    are a blank braille glyph and not a space: the terminal must be told to
+    clear them.
+    """
     width = columns * 2
     palette = quantise(pixels, width, rows * 2, palette_size)
     snapped = {}
@@ -222,7 +252,17 @@ def build_cells(pixels, columns, rows, background, palette_size):
             glyph, fg, bg = best_glyph(block)
             fg = DEFAULT_COLOUR if fg is None else pack(*snap(fg))
             bg = DEFAULT_COLOUR if bg is None else pack(*snap(bg))
-            words.extend((ord(glyph), fg, bg))
+            code = ord(glyph)
+
+            if marker is not None:
+                if column < MARKER_CELLS:
+                    code = marker_glyphs(marker, row)[column]
+                    colour = bg if bg != DEFAULT_COLOUR else (fg if fg != DEFAULT_COLOUR else 0)
+                    fg = bg = colour
+                elif code == 0x20 and fg == DEFAULT_COLOUR and bg == DEFAULT_COLOUR:
+                    code = BLANK
+
+            words.extend((code, fg, bg))
 
     if sys.byteorder == "big":
         words.byteswap()
@@ -329,6 +369,7 @@ def describe_stored(path):
 
 def command_inspect(arguments):
     prune(cache_dir())
+    prune(overlay_dir())
 
     try:
         data = base64.b64decode(sys.stdin.read().encode("ascii"))
@@ -493,13 +534,51 @@ def command_cells(arguments):
         kind, image, width, height, grid_width, grid_height,
         arguments.cell_width / 2, arguments.cell_height / 2, arguments.stretch,
     )
-    cells = build_cells(pixels, arguments.columns, arguments.rows, parse_background(arguments.background), arguments.palette)
+    marker = None
+    png = None
 
-    print(json.dumps({"ok": True, "columns": arguments.columns, "rows": arguments.rows, "cells": cells}))
+    if arguments.marker and arguments.columns >= MARKER_CELLS:
+        png, _, _ = write_box_png(kind, image, width, height, arguments)
+        marker = overlay_marker(png, arguments.columns, arguments.rows)
+
+    background = parse_background(arguments.background)
+    cells = build_cells(pixels, arguments.columns, arguments.rows, background, arguments.palette, marker)
+    reply = {"ok": True, "columns": arguments.columns, "rows": arguments.rows, "cells": cells}
+
+    if marker is not None:
+        register_overlay(marker, png, arguments.columns, arguments.rows, cells)
+        reply["marker"] = marker.hex()
+
+    print(json.dumps(reply))
 
 
-def command_png(arguments):
-    kind, image, width, height, _ = read_stored(arguments.path)
+def overlay_dir():
+    path = os.path.join(cache_dir(), "overlays")
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    return path
+
+
+def overlay_marker(png, columns, rows):
+    """The three bytes that name one box: its picture and its size."""
+    return hashlib.sha256(("%s:%d:%d" % (png, columns, rows)).encode()).digest()[:3]
+
+
+def register_overlay(marker, png, columns, rows, cells):
+    """Record what iterm_overlay.py draws for a marker, and the glyphs it covers."""
+    words = array("I", base64.b64decode(cells))
+
+    if sys.byteorder == "big":
+        words.byteswap()
+
+    glyphs = "".join(chr(words[index]) for index in range(0, len(words), 3))
+    record = {"png": png, "columns": columns, "rows": rows, "glyphs": glyphs}
+
+    with open(os.path.join(overlay_dir(), marker.hex() + ".json"), "w") as handle:
+        json.dump(record, handle)
+
+
+def write_box_png(kind, image, width, height, arguments):
+    """A PNG with the exact shape of the box, the picture centred in it."""
     # The box in device pixels, at twice the cell size for a sharp picture on a dense screen.
     box_width = arguments.columns * arguments.cell_width * 2
     box_height = arguments.rows * arguments.cell_height * 2
@@ -520,6 +599,13 @@ def command_png(arguments):
         Image.frombytes("RGBA", (out_width, out_height), pixels).save(out_path, "PNG")
     else:
         write_png(out_path, out_width, out_height, pixels)
+
+    return out_path, out_width, out_height
+
+
+def command_png(arguments):
+    kind, image, width, height, _ = read_stored(arguments.path)
+    out_path, out_width, out_height = write_box_png(kind, image, width, height, arguments)
 
     print(json.dumps({"ok": True, "path": out_path, "width": out_width, "height": out_height}))
 
@@ -562,6 +648,7 @@ def main():
     cells.add_argument("--stretch", action="store_true", help="fill the box instead of keeping the shape")
     cells.add_argument("--background", default="202020")
     cells.add_argument("--palette", type=int, default=0, help="reduce to this many colours (0 keeps them all)")
+    cells.add_argument("--marker", action="store_true", help="hide an id for iterm_overlay.py in the first cells")
     cells.set_defaults(run=command_cells)
 
     png = commands.add_parser("png")

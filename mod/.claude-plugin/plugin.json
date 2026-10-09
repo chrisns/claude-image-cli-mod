@@ -1,16 +1,23 @@
 {
   "name": "inline-images",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Shows the images that a command prints with the iTerm2 inline images protocol (imgcat and friends) as a preview in the Claude Code transcript, and keeps their base64 out of the model's context.",
-  "author": { "name": "Chris Nesbitt-Smith" },
+  "author": {
+    "name": "Chris Nesbitt-Smith"
+  },
   "license": "MIT",
   "userConfig": {
     "renderer": {
       "title": "Renderer",
       "type": "string",
-      "options": ["auto", "cells", "image"],
+      "options": [
+        "auto",
+        "iterm",
+        "image",
+        "cells"
+      ],
       "default": "auto",
-      "description": "cells: coloured block characters, works in every terminal. image: real pixels, only kitty and Ghostty draw them. auto: image where the terminal can, cells elsewhere."
+      "description": "auto: real pixels in iTerm2 (iterm) and in kitty and Ghostty (image), block characters elsewhere. iterm: draw over the block preview with the iTerm2 inline images protocol; needs `pip install iterm2` and the iTerm2 Python API. image: the kitty graphics protocol. cells: block characters, every terminal."
     },
     "max_columns": {
       "title": "Widest preview (columns)",
@@ -40,7 +47,7 @@
       "title": "Python command",
       "type": "string",
       "default": "python3",
-      "description": "The Python 3 that runs bin/render.py. It needs Pillow, or ImageMagick must be installed."
+      "description": "The Python 3 that runs bin/render.py and bin/iterm_overlay.py. It needs Pillow (or ImageMagick installed), and the iterm2 module for real pixels in iTerm2."
     }
   }
 }

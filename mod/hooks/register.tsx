@@ -8,9 +8,12 @@ import {
   drawsPixels,
   imageKey,
   outputText,
+  overlayMessages,
   parseReply,
   readOptions,
   savedPath,
+  wantsOverlay,
+  withoutImages,
   withText,
   type Inspected,
   type Options,
@@ -27,21 +30,11 @@ type Source = { text: string; saved?: string }
 // resize draws again, so the decoded image is kept here.
 const inspected = new Map<string, Promise<Inspected>>()
 
+// The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
+// Cells carry its marker only then, so a terminal without it shows no marker.
+let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
+
 const hasImage = (output: unknown) => outputText(output)?.includes(']1337;') === true
-
-// The text of an output once its images are cut out: the pictures take their place.
-// An output that was only images says so, where the engine would say "No output".
-const withoutImages = (text: string) => {
-  const { text: rest, images } = extract(text, () => '', '')
-  // Data that a size limit cut off holds an image that `images` cannot count.
-  const count = Math.max(1, images.filter(image => image.isInline).length)
-
-  if (rest.trim() !== '' || !text.includes(']1337;')) {
-    return rest
-  }
-
-  return count === 1 ? '(inline image)' : `(${count} inline images)`
-}
 
 const sourceOf = (output: unknown): Source[] => {
   const text = outputText(output)
@@ -167,7 +160,16 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
           columns={box.columns}
           rows={box.rows}
           cells={
-            (await run<{ cells: string }>(['cells', stored.path, ...size, '--palette', String(options.palette)])).cells
+            (
+              await run<{ cells: string }>([
+                'cells',
+                stored.path,
+                ...size,
+                '--palette',
+                String(options.palette),
+                ...(overlay === 'live' ? ['--marker'] : []),
+              ])
+            ).cells
           }
         />
       )
@@ -194,6 +196,58 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
 export const register: Register = (on, settings) => {
   const hidesFromModel = settings.hide_from_model !== false
+
+  // In iTerm2, start the overlay that draws real pixels over the cell previews.
+  on('session.start', async ($, e, next) => {
+    const started = await next(e)
+    const options = readOptions(settings, $.plugin.root)
+    const sessionId = await $.env.get('ITERM_SESSION_ID')
+
+    if (overlay !== 'off' || sessionId === undefined || !wantsOverlay(options.renderer, await $.env.get('TERM_PROGRAM'))) {
+      return started
+    }
+
+    overlay = 'starting'
+
+    // The loop is the child's life: it runs on after this hook returns and ends with the module.
+    void (async () => {
+      let buffer = ''
+      let reason = 'the overlay stopped'
+
+      try {
+        for await (const piece of $.process.spawn({ argv: [options.python, options.overlay, '--session', sessionId] })) {
+          if (piece.stream !== 'stdout') {
+            continue
+          }
+
+          const { messages, rest } = overlayMessages(buffer + piece.text)
+          buffer = rest
+
+          for (const message of messages) {
+            if (message.ready === true) {
+              overlay = 'live'
+              // Rows drawn before now have no marker: draw them again.
+              $.ui.invalidate('ui.render')
+            } else if (message.ok === false && message.error !== undefined) {
+              reason = message.error
+            }
+          }
+        }
+      } catch (problem) {
+        reason = problem instanceof Error ? problem.message : String(problem)
+      }
+
+      const wasLive = overlay === 'live'
+      overlay = 'failed'
+      $.ui.invalidate('ui.render')
+
+      if (!wasLive) {
+        $.ui.toast(`inline-images: block previews only, no real pixels in iTerm2: ${reason}`)
+      }
+    })()
+
+    return started
+  })
 
   // What the model reads. The transcript keeps the whole output, so the preview
   // can be drawn again after a resume.

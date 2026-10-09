@@ -1,6 +1,17 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { caption, drawsPixels, outputText, parseReply, readOptions, savedPath, withText } from '../hooks/preview.ts'
+import {
+  caption,
+  drawsPixels,
+  outputText,
+  overlayMessages,
+  parseReply,
+  readOptions,
+  savedPath,
+  wantsOverlay,
+  withoutImages,
+  withText,
+} from '../hooks/preview.ts'
 import { parseArguments } from '../hooks/osc1337.ts'
 
 describe('parseReply', () => {
@@ -60,6 +71,7 @@ describe('options', () => {
       palette: 0,
       python: 'python3',
       helper: '/mod/bin/render.py',
+      overlay: '/mod/bin/iterm_overlay.py',
     })
   })
 
@@ -71,6 +83,26 @@ describe('options', () => {
 
   test('an unknown renderer is auto', () => {
     expect(readOptions({ renderer: 'sixel' }, '/mod').renderer).toBe('auto')
+  })
+
+  test('iterm is a renderer', () => {
+    expect(readOptions({ renderer: 'iterm' }, '/mod').renderer).toBe('iterm')
+  })
+})
+
+describe('iTerm2 overlay', () => {
+  test('auto turns it on in iTerm2 only', () => {
+    expect(wantsOverlay('auto', 'iTerm.app')).toBe(true)
+    expect(wantsOverlay('auto', 'ghostty')).toBe(false)
+    expect(wantsOverlay('cells', 'iTerm.app')).toBe(false)
+    expect(wantsOverlay('iterm', 'Apple_Terminal')).toBe(true)
+  })
+
+  test('reads whole lines and keeps the part line', () => {
+    const { messages, rest } = overlayMessages('{"ok": true, "ready": true}\nnoise\n{"ok": fa')
+
+    expect(messages).toEqual([{ ok: true, ready: true }])
+    expect(rest).toBe('{"ok": fa')
   })
 })
 
@@ -91,5 +123,25 @@ describe('tool output', () => {
     expect(savedPath({ persistedOutputPath: '/tmp/x.txt' })).toBe('/tmp/x.txt')
     expect(savedPath({ persistedOutputPath: '' })).toBeUndefined()
     expect(savedPath({})).toBeUndefined()
+  })
+})
+
+describe('withoutImages', () => {
+  const ESC = '\u001b'
+  const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const legacy = `${ESC}]1337;File=inline=1;width=20:${PNG}\u0007\n`
+  const wrapped = `${ESC}Ptmux;${ESC}${ESC}]1337;File=inline=1:${PNG}\u0007${ESC}\\\n`
+
+  test('an output of only images says how many', () => {
+    expect(withoutImages(legacy)).toBe('(inline image)')
+    expect(withoutImages(legacy + wrapped)).toBe('(2 inline images)')
+  })
+
+  test('other text stays', () => {
+    expect(withoutImages(`made it\n${legacy}`)).toBe('made it\n\n')
+  })
+
+  test('data cut off by a size limit is still an image', () => {
+    expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`)).toBe('(inline image)')
   })
 })

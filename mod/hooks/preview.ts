@@ -1,12 +1,13 @@
-import { formatBytes, type InlineHead } from './osc1337.ts'
+import { extract, formatBytes, type InlineHead } from './osc1337.ts'
 
 export type Options = {
-  renderer: 'auto' | 'cells' | 'image'
+  renderer: 'auto' | 'cells' | 'image' | 'iterm'
   maxColumns: number
   maxRows: number
   palette: number
   python: string
   helper: string
+  overlay: string
 }
 
 export type Inspected = {
@@ -95,13 +96,34 @@ export function readOptions(
     typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
 
   return {
-    renderer: renderer === 'cells' || renderer === 'image' ? renderer : 'auto',
+    renderer: renderer === 'cells' || renderer === 'image' || renderer === 'iterm' ? renderer : 'auto',
     maxColumns: Math.max(1, Math.min(255, number(options.max_columns, 100))),
     maxRows: Math.max(1, Math.min(255, number(options.max_rows, 28))),
     palette: Math.min(256, number(options.palette, 0)),
     python: typeof options.python === 'string' && options.python !== '' ? options.python : 'python3',
     helper: `${root}/bin/render.py`,
+    overlay: `${root}/bin/iterm_overlay.py`,
   }
+}
+
+/** Whether to draw real pixels over the cells with the iTerm2 overlay. */
+export function wantsOverlay(renderer: Options['renderer'], program: string | undefined): boolean {
+  return renderer === 'iterm' || (renderer === 'auto' && program === 'iTerm.app')
+}
+
+/** The overlay's one-line JSON messages, from the text it has written so far. */
+export function overlayMessages(buffer: string): { messages: { ok?: boolean; ready?: boolean; error?: string }[]; rest: string } {
+  const lines = buffer.split('\n')
+  const rest = lines.pop() ?? ''
+  const messages = lines.flatMap(line => {
+    try {
+      return [JSON.parse(line)]
+    } catch {
+      return []
+    }
+  })
+
+  return { messages, rest }
 }
 
 /** The text of a tool's output, wherever the tool kept it. */
@@ -122,4 +144,20 @@ export function outputText(output: unknown): string | undefined {
 /** The same output with its text replaced. */
 export function withText(output: unknown, text: string): unknown {
   return typeof output === 'string' ? text : { ...(output as Record<string, unknown>), stdout: text }
+}
+
+/**
+ * The text of an output once its images are cut out: the pictures take their place.
+ * An output that was only images says so, where the engine would say "No output".
+ */
+export function withoutImages(text: string): string {
+  const { text: rest, images } = extract(text, () => '', '')
+  // Data that a size limit cut off holds an image that `images` cannot count.
+  const count = Math.max(1, images.filter(image => image.isInline).length)
+
+  if (rest.trim() !== '' || !text.includes(']1337;')) {
+    return rest
+  }
+
+  return count === 1 ? '(inline image)' : `(${count} inline images)`
 }

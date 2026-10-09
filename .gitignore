@@ -1,0 +1,5 @@
+node_modules/
+mod/.claude-plugin/types/
+__pycache__/
+.DS_Store
+docs/screenshots/raw-*

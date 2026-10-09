@@ -1,0 +1,14 @@
+{
+  "name": "claude-image-cli-mod",
+  "owner": {
+    "name": "Chris Nesbitt-Smith"
+  },
+  "plugins": [
+    {
+      "name": "inline-images",
+      "source": "./mod",
+      "description": "Preview the images that a command prints with the iTerm2 inline images protocol (imgcat and friends) in the Claude Code transcript."
+    }
+  ],
+  "description": "A Claude Code mod that previews inline images from imgcat and similar tools."
+}

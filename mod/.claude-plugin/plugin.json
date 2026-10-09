@@ -1,0 +1,46 @@
+{
+  "name": "inline-images",
+  "version": "0.1.0",
+  "description": "Shows the images that a command prints with the iTerm2 inline images protocol (imgcat and friends) as a preview in the Claude Code transcript, and keeps their base64 out of the model's context.",
+  "author": { "name": "Chris Nesbitt-Smith" },
+  "license": "MIT",
+  "userConfig": {
+    "renderer": {
+      "title": "Renderer",
+      "type": "string",
+      "options": ["auto", "cells", "image"],
+      "default": "auto",
+      "description": "cells: coloured block characters, works in every terminal. image: real pixels, only kitty and Ghostty draw them. auto: image where the terminal can, cells elsewhere."
+    },
+    "max_columns": {
+      "title": "Widest preview (columns)",
+      "type": "number",
+      "default": 100,
+      "description": "A preview never takes more columns than this, nor more than the transcript has."
+    },
+    "max_rows": {
+      "title": "Tallest preview (rows)",
+      "type": "number",
+      "default": 28,
+      "description": "A preview never takes more rows than this."
+    },
+    "palette": {
+      "title": "Colours per preview",
+      "type": "number",
+      "default": 0,
+      "description": "Reduce a cell preview to this many colours. 0 keeps all of them. Claude Code paints about 1024 distinct colour pairs at once, so a value near 32 can look cleaner on a busy picture."
+    },
+    "hide_from_model": {
+      "title": "Keep the image data out of the model's context",
+      "type": "boolean",
+      "default": true,
+      "description": "Replace each image's base64 in the tool result the model reads with a one-line note. A 1 MB image is about 1.3 million characters of base64."
+    },
+    "python": {
+      "title": "Python command",
+      "type": "string",
+      "default": "python3",
+      "description": "The Python 3 that runs bin/render.py. It needs Pillow, or ImageMagick must be installed."
+    }
+  }
+}

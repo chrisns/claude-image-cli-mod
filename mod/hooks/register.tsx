@@ -35,11 +35,13 @@ type Source = TextSource | { file: string }
 const inspected = new Map<string, Promise<Inspected>>()
 
 // The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
-// Cells carry its marker only then, so a terminal without it shows no marker.
+// Cells carry its marker unless it failed, so a terminal without it shows none.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
 
-// The files a click on a preview may open: only ones this mod drew.
-const openable = new Set<string>()
+// What a click on a preview opens, by the drawing and the click layer's key: only
+// files this mod drew, looked up here and never taken from the message itself.
+const clickTargets = new Map<string, string>()
+const clickKey = (requestId: string, element: string) => `${requestId}\u0000${element}`
 
 const hasImage = (output: unknown) => outputText(output)?.includes(']1337;') === true
 
@@ -150,6 +152,13 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     .then((size): Cell => (size.width && size.height ? { width: size.width, height: size.height } : DEFAULT_CELL))
     .catch(() => DEFAULT_CELL)
 
+  // Markers whenever the overlay is wanted here and has not failed: a row drawn while
+  // it starts (as after a reload) is not always drawn again once it is ready.
+  const usesOverlay =
+    overlay !== 'failed' &&
+    (await $.env.get('ITERM_SESSION_ID')) !== undefined &&
+    wantsOverlay(options.renderer, await $.env.get('TERM_PROGRAM'))
+
   const isPixelTerminal = drawsPixels(
     await $.env.get('TERM_PROGRAM'),
     await $.env.get('TERM'),
@@ -163,7 +172,9 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     try {
       stored = await inspect()
       const opens = file ?? stored.named ?? stored.path
-      openable.add(opens)
+      // Unique per row and picture: two layers under one key share one instance.
+      const layer = `inline-click-${e.requestId}-${index}`
+      clickTargets.set(clickKey(e.requestId, layer), opens)
 
       const box = fit(stored, head, {
         viewportColumns: e.viewport?.columns ?? 80,
@@ -207,7 +218,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
                 ...size,
                 '--palette',
                 String(options.palette),
-                ...(overlay === 'live' ? ['--marker'] : []),
+                ...(usesOverlay ? ['--marker'] : []),
               ])
             ).cells
           }
@@ -221,7 +232,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
             {/* A click on the picture opens the file in the system's own viewer. */}
             <Box position="absolute" top={0} left={0} width={box.columns} height={box.rows}>
               <Client
-                key={`inline-click-${index}`}
+                key={layer}
                 module="./click.tsx"
                 props={{ path: opens }}
                 width={box.columns}
@@ -316,9 +327,10 @@ export const register: Register = (on, settings) => {
 
   // A click on a preview: open the file in the system's own viewer (Preview on macOS).
   on('ui.message', async ($, e, next) => {
-    const { open } = (e.data ?? {}) as { open?: unknown }
+    const { open: asked } = (e.data ?? {}) as { open?: unknown }
+    const open = clickTargets.get(clickKey(e.requestId, e.element))
 
-    if (typeof open === 'string' && openable.has(open)) {
+    if (asked !== undefined && open !== undefined) {
       const opened = await $.process.run(['open', open]).catch(() => undefined)
 
       if (opened === undefined || opened.exitCode !== 0) {

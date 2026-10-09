@@ -1,11 +1,14 @@
-import { extract } from './osc1337.ts'
+import { describe, extract } from './osc1337.ts'
 
 type Block = { type: string; [field: string]: unknown }
 
 /** Cut every inline image out of one string; the same string comes back when there is none. */
 export function strip(text: string): string {
-  return extract(text).text
+  return extract(text, image => describe(image).replace(/]$/, ', shown to the user]'), SHOWN_CUT).text
 }
+
+/** The note for image data that a size limit cut off: the mod read it whole and showed it. */
+export const SHOWN_CUT = '[inline image data left out here; the user saw the image]'
 
 /**
  * Rewrite the content of a tool result so that no image data is in it.

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import {
   caption,
+  deliveredImages,
   drawsPixels,
   outputText,
   overlayMessages,
@@ -143,5 +144,25 @@ describe('withoutImages', () => {
 
   test('data cut off by a size limit is still an image', () => {
     expect(withoutImages(`${ESC}]1337;File=inline=1:AAAA`)).toBe('(inline image)')
+  })
+})
+
+describe('deliveredImages', () => {
+  test('the image files that SendUserFile delivered', () => {
+    const output = {
+      attachments: [
+        { path: '/Users/me/photo.jpg', size: 9, isImage: true, media_type: 'image/jpeg' },
+        { path: '/Users/me/report.pdf', size: 9, isImage: false, media_type: 'application/pdf' },
+        { path: '/Users/me/scan.webp', size: 9, isImage: false, media_type: 'image/webp' },
+      ],
+    }
+
+    expect(deliveredImages(output)).toEqual(['/Users/me/photo.jpg', '/Users/me/scan.webp'])
+  })
+
+  test('nothing from a result without attachments', () => {
+    expect(deliveredImages({ stdout: 'x' })).toEqual([])
+    expect(deliveredImages('text')).toEqual([])
+    expect(deliveredImages({ attachments: 'no' })).toEqual([])
   })
 })

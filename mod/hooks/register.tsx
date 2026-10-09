@@ -2,9 +2,10 @@ import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import { DEFAULT_CELL, fit, type Cell } from './layout.ts'
 import { stripBlocks } from './model.ts'
-import { extract, parseArguments } from './osc1337.ts'
+import { extract, parseArguments, type InlineHead } from './osc1337.ts'
 import {
   caption,
+  deliveredImages,
   drawsPixels,
   imageKey,
   outputText,
@@ -24,7 +25,9 @@ type Settings = Parameters<Register>[1]
 
 // A tool output that may hold images: its text, and where the whole of it is
 // saved when the tool cut the text short.
-type Source = { text: string; saved?: string }
+type TextSource = { text: string; saved?: string }
+// Or an image file a tool delivered to the person (SendUserFile, SendUserMessage).
+type Source = TextSource | { file: string }
 
 // Decoding runs once per image. The engine keeps a drawing per input, but a
 // resize draws again, so the decoded image is kept here.
@@ -36,7 +39,7 @@ let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
 
 const hasImage = (output: unknown) => outputText(output)?.includes(']1337;') === true
 
-const sourceOf = (output: unknown): Source[] => {
+const sourceOf = (output: unknown): TextSource[] => {
   const text = outputText(output)
 
   return text !== undefined && text.includes(']1337;') ? [{ text, saved: savedPath(output) }] : []
@@ -62,7 +65,37 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
   const found: Pic[] = []
 
-  for (const { text, saved } of sources) {
+  for (const source of sources) {
+    if ('file' in source) {
+      // A delivered file: the picture is the file itself.
+      const path = source.file
+      const head: InlineHead = {
+        name: path,
+        width: { unit: 'auto' },
+        height: { unit: 'auto' },
+        isAspectPreserved: true,
+        isInline: true,
+      }
+
+      found.push({
+        head,
+        inspect: () => {
+          let stored = inspected.get(path)
+
+          if (stored === undefined) {
+            stored = run<Inspected>(['inspect', '--file', path])
+            inspected.set(path, stored)
+            stored.catch(() => inspected.delete(path))
+          }
+
+          return stored
+        },
+      })
+      continue
+    }
+
+    const { text, saved } = source
+
     if (saved !== undefined) {
       // The tool cut the text short: the whole output is in a file.
       try {
@@ -260,6 +293,33 @@ export const register: Register = (on, settings) => {
 
     return next(content === e.message.content ? e : { ...e, message: { ...e.message, content: [...content] } })
   }).catch(($, e, next) => next(e))
+
+  // A file delivered to the person: show the picture under the delivery.
+  on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
+    const files = e.props.isErrored ? [] : deliveredImages(e.props.output)
+
+    if (files.length === 0) {
+      return next(e)
+    }
+
+    const base = await next(e)
+    const drawn = await previews(
+      $,
+      e,
+      settings,
+      files.map(file => ({ file })),
+    )
+    const { Box } = $.ui.resolve(e)
+
+    return drawn.length === 0 ? (
+      base
+    ) : (
+      <Box flexDirection="column">
+        {base}
+        {drawn}
+      </Box>
+    )
+  })
 
   // A call drawn on its own row: the picture goes under the result.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {

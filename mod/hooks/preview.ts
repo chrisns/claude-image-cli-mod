@@ -161,3 +161,26 @@ export function withoutImages(text: string): string {
 
   return count === 1 ? '(inline image)' : `(${count} inline images)`
 }
+
+/**
+ * The image files a tool delivered to the person, from its result's attachments
+ * (SendUserFile, SendUserMessage): the ones it marked as images.
+ */
+export function deliveredImages(output: unknown): string[] {
+  if (typeof output !== 'object' || output === null || !('attachments' in output)) {
+    return []
+  }
+
+  const { attachments } = output as { attachments: unknown }
+
+  if (!Array.isArray(attachments)) {
+    return []
+  }
+
+  return attachments.flatMap(attachment => {
+    const { path, isImage, media_type } = (attachment ?? {}) as Record<string, unknown>
+    const image = isImage === true || (typeof media_type === 'string' && media_type.startsWith('image/'))
+
+    return typeof path === 'string' && path !== '' && image ? [path] : []
+  })
+}

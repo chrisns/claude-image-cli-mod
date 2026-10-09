@@ -371,10 +371,21 @@ def command_inspect(arguments):
     prune(cache_dir())
     prune(overlay_dir())
 
-    try:
-        data = base64.b64decode(sys.stdin.read().encode("ascii"))
-    except (binascii.Error, UnicodeEncodeError):
-        fail("the image data is not base64")
+    if arguments.file:
+        # A file on disk, delivered as it is: read it, no base64 on the way.
+        try:
+            if os.path.getsize(arguments.file) > MAX_BYTES:
+                fail("the image is larger than %d MB" % (MAX_BYTES // 1024 // 1024))
+
+            with open(arguments.file, "rb") as handle:
+                data = handle.read()
+        except OSError as problem:
+            fail("cannot read %s: %s" % (arguments.file, problem.strerror))
+    else:
+        try:
+            data = base64.b64decode(sys.stdin.read().encode("ascii"))
+        except (binascii.Error, UnicodeEncodeError):
+            fail("the image data is not base64")
 
     print(json.dumps(store_image(data)))
 
@@ -631,7 +642,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
 
-    commands.add_parser("inspect").set_defaults(run=command_inspect)
+    inspect = commands.add_parser("inspect")
+    inspect.add_argument("--file", help="read the image from this file, not base64 from stdin")
+    inspect.set_defaults(run=command_inspect)
 
     commands.add_parser("cell").set_defaults(run=command_cell)
 

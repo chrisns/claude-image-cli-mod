@@ -13,6 +13,7 @@ The picture above is a NASA photo of the Earth. It is a real iTerm2 inline image
 ## What it does
 
 - It draws each image under the tool call that printed it.
+- It draws image files that Claude delivers to you with `SendUserFile` or `SendUserMessage`.
 - It opens the "Ran 1 shell command" group when the group holds an image.
 - It removes the base64 from what the model reads. A 1 MB image is about 1.3 million characters.
 - It reads output that Claude Code cut at 30,000 characters, so large images work.
@@ -121,7 +122,7 @@ Decoded images are cached in a private folder under your temp directory. The mod
 - A GIF shows its first frame.
 - The preview is a still picture. It does not move.
 - A cell preview has about 4 by 8 pixels in each cell. It is a preview, not a viewer.
-- The model cannot see the image. It reads a note such as `[inline image: earth.jpg, 141.6 KB]`. To let the model look at a picture, ask it to read the file.
+- The model cannot see the image. It reads a note such as `[inline image: earth.jpg, 141.6 KB, shown to the user]`. To let the model look at a picture, ask it to read the file.
 - `image` shows a blank box when the terminal is on another machine, for example over ssh. The terminal must be able to read the file.
 - The `iterm` overlay needs the iTerm2 Python API on the machine where iTerm2 runs. Over ssh you get block previews.
 - In iTerm2, a row that Claude Code covers with a hint stays a block preview until the hint goes.

@@ -1184,6 +1184,183 @@ def png_bytes(width, height, rgba):
     )
 
 
+# ---------------------------------------------------------------------------
+# Mermaid
+#
+# A ```mermaid block in a reply is drawn as a picture. mmdc (mermaid-cli)
+# renders it in a headless browser; the PNG then goes through the same cache,
+# previews and click-to-open as any other image.
+
+MERMAID_MAX_SOURCE = 64 * 1024
+MERMAID_THEMES = ("default", "neutral", "dark", "forest")
+MERMAID_SCALE = 2  # twice the pixels, for a sharp picture on a dense screen
+MERMAID_ERROR_SIZE = (512, 109)  # the picture Mermaid draws for a syntax error, at scale 1
+BROWSER_APPS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+)
+BROWSER_COMMANDS = ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave-browser")
+
+
+def find_browser():
+    """A Chrome-family browser for mmdc, when Puppeteer has none of its own."""
+    chosen = os.environ.get("PUPPETEER_EXECUTABLE_PATH")
+
+    if chosen and os.access(chosen, os.X_OK):
+        return chosen
+
+    for path in BROWSER_APPS:
+        if os.access(path, os.X_OK):
+            return path
+
+    for command in BROWSER_COMMANDS:
+        found = shutil.which(command)
+
+        if found:
+            return found
+
+    return None  # Puppeteer's own download, if there is one
+
+
+def mermaid_kind(source):
+    """The diagram's type: the first word after any front matter and comments."""
+    lines = iter(source.splitlines())
+
+    for line in lines:
+        text = line.strip()
+
+        if text == "---":  # YAML front matter, up to the next ---
+            for inner in lines:
+                if inner.strip() == "---":
+                    break
+            continue
+
+        if text and not text.startswith("%%"):
+            return re.sub(r"[^A-Za-z0-9-]", "", text.split()[0]) or "diagram"
+
+    return "diagram"
+
+
+def mermaid_error(stderr):
+    """The useful lines of what mmdc printed about a failure."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
+    lines = [line.rstrip() for line in plain.splitlines()]
+
+    for index, line in enumerate(lines):
+        if line.startswith("Error:"):
+            useful = [line[len("Error:"):].strip()] + [
+                text for text in lines[index + 1 : index + 4] if text and not text.lstrip().startswith("at ")
+            ]
+            return " ".join(part for part in useful if part)[:300]
+
+    return (plain.strip().splitlines() or ["mmdc failed"])[-1][:300]
+
+
+def run_mmdc(tool, browser, source_path, out_path, arguments):
+    command = [
+        tool, "--quiet", "-i", source_path, "-o", out_path,
+        "-t", arguments.theme, "-b", arguments.background, "-s", str(MERMAID_SCALE),
+    ]
+
+    if browser is not None:
+        config = os.path.join(cache_dir(), "puppeteer.json")
+        write_atomic(config, json.dumps({"executablePath": browser, "headless": "shell"}).encode())
+        command += ["-p", config]
+
+    try:
+        return subprocess.run(command, capture_output=True, text=True, timeout=90)
+    except subprocess.TimeoutExpired:
+        fail("Mermaid took more than 90 seconds to draw this diagram")
+
+
+def looks_like_error(path):
+    """Whether a PNG has the size of Mermaid's 'Syntax error in text' picture."""
+    try:
+        if HAVE_PILLOW:
+            with Image.open(path) as picture:
+                width, height = picture.size
+        else:
+            with open(path, "rb") as handle:
+                width, height = struct.unpack(">II", handle.read(24)[16:24])
+    except (OSError, struct.error, ValueError):
+        return False
+
+    expected = [size * MERMAID_SCALE for size in MERMAID_ERROR_SIZE]
+
+    return abs(width - expected[0]) <= 4 * MERMAID_SCALE and abs(height - expected[1]) <= 4 * MERMAID_SCALE
+
+
+def command_mermaid(arguments):
+    source = sys.stdin.read()
+
+    if not source.strip():
+        fail("the diagram is empty")
+
+    if len(source.encode()) > MERMAID_MAX_SOURCE:
+        fail("the diagram is longer than %d KB" % (MERMAID_MAX_SOURCE // 1024))
+
+    if arguments.theme not in MERMAID_THEMES:
+        fail("unknown Mermaid theme %s" % arguments.theme)
+
+    tool = shutil.which("mmdc")
+
+    if tool is None:
+        fail("Mermaid needs mmdc: run `npm install -g @mermaid-js/mermaid-cli`")
+
+    prune(cache_dir())
+    folder = secure_folder(os.path.join(cache_dir(), "mermaid"))
+    key = hashlib.sha256("\0".join([source, arguments.theme, arguments.background, str(MERMAID_SCALE)]).encode()).hexdigest()[:24]
+    rendered = os.path.join(folder, key + ".png")
+    kind = mermaid_kind(source)
+
+    if not os.path.isfile(rendered):
+        browser = find_browser()
+
+        with tempfile.TemporaryDirectory(dir=folder) as work:
+            source_path = os.path.join(work, "diagram.mmd")
+            out_path = os.path.join(work, "diagram.png")
+
+            with open(source_path, "w") as handle:
+                handle.write(source)
+
+            ran = run_mmdc(tool, browser, source_path, out_path, arguments)
+
+            if ran.returncode != 0 or not os.path.isfile(out_path):
+                fail("Mermaid: %s" % mermaid_error(ran.stderr or ran.stdout))
+
+            # Some diagram types draw a 'Syntax error' picture and exit 0. One with
+            # that picture's size is checked as SVG, which says so in words.
+            if looks_like_error(out_path):
+                svg = os.path.join(work, "diagram.svg")
+                run_mmdc(tool, browser, source_path, svg, arguments)
+
+                with open(svg, errors="replace") as handle:
+                    if "Syntax error in text" in handle.read():
+                        fail("Mermaid: syntax error in this %s diagram" % kind)
+
+            os.replace(out_path, rendered)
+
+    os.utime(rendered)
+
+    with open(rendered, "rb") as handle:
+        described = store_image(handle.read())
+
+    named = named_copy(described["path"], "%s.png" % kind)
+
+    if named is not None:
+        described["named"] = named
+
+    described["kind"] = kind
+    print(json.dumps(described))
+
+
+def command_mermaid_check(arguments):
+    """What drawing a diagram would use: mmdc and a browser, or what is missing."""
+    print(json.dumps({"ok": True, "mmdc": shutil.which("mmdc"), "browser": find_browser()}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1210,6 +1387,13 @@ def main():
     cells.add_argument("--palette", type=int, default=0, help="reduce to this many colours (0 keeps them all)")
     cells.add_argument("--marker", action="store_true", help="hide an id for iterm_overlay.py in the first cells")
     cells.set_defaults(run=command_cells)
+
+    mermaid = commands.add_parser("mermaid", help="draw a Mermaid diagram, its source on stdin")
+    mermaid.add_argument("--theme", default="default", help="default, neutral, dark or forest")
+    mermaid.add_argument("--background", default="white", help="a CSS colour, or transparent")
+    mermaid.set_defaults(run=command_mermaid)
+
+    commands.add_parser("mermaid-check").set_defaults(run=command_mermaid_check)
 
     png = commands.add_parser("png")
     png.add_argument("path")

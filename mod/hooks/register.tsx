@@ -1,10 +1,12 @@
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import { DEFAULT_CELL, fit, type Cell } from './layout.ts'
+import { MERMAID_GUIDE, mermaidKind, splitMermaid } from './mermaid.ts'
 import { stripBlocks } from './model.ts'
 import { baseName, extract, hasImageSequence, parseArguments, type InlineHead } from './osc1337.ts'
 import {
   caption,
+  cellRuns,
   deliveredImages,
   drawsPixels,
   fileUrl,
@@ -30,7 +32,9 @@ type Settings = Parameters<Register>[1]
 type TextSource = { text: string; saved?: string }
 // Or an image file a tool delivered to the person (SendUserFile, SendUserMessage).
 type FileSource = { file: string }
-type Source = TextSource | FileSource
+// Or a Mermaid diagram from one of Claude's replies.
+type MermaidSource = { mermaid: string }
+type Source = TextSource | FileSource | MermaidSource
 
 type Scanned = { images: (Inspected & { args: string })[] }
 
@@ -38,6 +42,8 @@ type Scanned = { images: (Inspected & { args: string })[] }
 // imgcat over a folder must not start hundreds of processes.
 const MAX_IMAGES = 16
 const PARALLEL = 4
+// A draw that took longer than this is drawn once more when it is ready.
+const SLOW_DRAW_MS = 800
 
 // What the helper decoded, by image. The engine keeps a drawing per input, but
 // a resize or a reload draws again, so the work is kept here, bounded.
@@ -50,6 +56,10 @@ const cellSizes = new Lru<number, Cell>(8)
 
 // The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
+
+// Whether this machine can draw Mermaid diagrams (mmdc is installed): Claude
+// is told it can draw them only then.
+let canDrawMermaid = false
 
 // What a click on a preview opens, by the drawing and the click layer's key:
 // only files this mod drew, looked up here and never taken from the message.
@@ -78,6 +88,14 @@ function strippedOutput(output: unknown, shown?: number): unknown {
   return withText(output, withoutImages(text, count))
 }
 
+/** The cache key of a diagram's picture. */
+const diagramKey = (theme: string, source: string) => `mermaid:${theme}:${imageKey(source)}`
+
+// Diagrams whose picture is ready: drawn at once. Any other is rendered in the
+// background while its reply shows a short line, then drawn: a render hook that
+// waits seconds for a browser leaves its reply unpainted.
+const readyDiagrams = new Lru<string, true>(200)
+
 /** Remember a promise under a key, and forget it if it fails, so the next draw tries again. */
 function remember<V>(cache: Lru<string, Promise<V>>, key: string, start: () => Promise<V>): Promise<V> {
   let found = cache.get(key)
@@ -97,12 +115,13 @@ function remember<V>(cache: Lru<string, Promise<V>>, key: string, start: () => P
  *
  * `e` is the row being drawn: its surface picks the elements, its viewport the size.
  */
-async function previews($: EngineInterface, e: RenderInput, settings: Settings, sources: Source[]) {
+async function previews($: EngineInterface, e: RenderInput, settings: Settings, sources: Source[], asText = false) {
   if (sources.length === 0 || e.surface !== 'terminal') {
     return { nodes: [], shown: 0 }
   }
 
   const options: Options = readOptions(settings, $.plugin.root)
+  const startedAt = await $.clock.now()
 
   const run = async <T,>(args: string[], stdin?: string): Promise<T> => {
     const ran = await $.process.run([options.python, options.helper, ...args], { stdin, timeoutMs: 60000 })
@@ -113,6 +132,21 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
   const found: Pic[] = []
 
   for (const source of sources) {
+    if ('mermaid' in source) {
+      const diagram = source.mermaid
+      const key = diagramKey(options.mermaidTheme, diagram)
+      const kind = mermaidKind(diagram)
+
+      found.push({
+        head: { name: '', width: { unit: 'auto' }, height: { unit: 'auto' }, isAspectPreserved: true, isInline: true },
+        title: `${kind} diagram`,
+        fallback: `\`\`\`mermaid\n${diagram}\n\`\`\``,
+        inspect: () => remember(inspected, key, () => run<Inspected>(['mermaid', '--theme', options.mermaidTheme], diagram)),
+        forget: () => inspected.delete(key),
+      })
+      continue
+    }
+
     if ('file' in source) {
       // A delivered file. It is copied into the cache as it is now: the file may
       // change later, so the key holds the row as well as the path.
@@ -194,7 +228,9 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     overlay !== 'failed' && (await $.env.get('ITERM_SESSION_ID')) !== undefined && wantsOverlay(options.renderer, program)
   const isPixelTerminal = drawsPixels(program, await $.env.get('TERM'), await $.env.get('KITTY_WINDOW_ID'))
   const isPixels = options.renderer === 'image' || (options.renderer === 'auto' && isPixelTerminal)
-  const { Box, Text, Raster, Image, Client, Link } = $.ui.resolve(e)
+  const { Box, Text, Raster, Image, Client, Link, Markdown } = $.ui.resolve(e)
+  const label = (pic: Pic, stored: Inspected | undefined) =>
+    pic.title === undefined ? caption(pic.head, stored) : stored === undefined ? pic.title : `${pic.title} \u00b7 ${stored.width}\u00d7${stored.height}`
 
   const picture = async (pic: Pic, index: number, isRetry = false): Promise<ReturnType<typeof Box>> => {
     const { head } = pic
@@ -237,26 +273,38 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
           source={{ file: (await run<{ path: string }>(['png', stored.path, ...size])).path, format: 'png' }}
           columns={box.columns}
           rows={box.rows}
-          alt={caption(head, stored)}
+          alt={label(pic, stored)}
         />
       ) : (
-        <Raster
-          key={`inline-image-${index}`}
-          columns={box.columns}
-          rows={box.rows}
-          cells={
-            (
-              await run<{ cells: string }>([
-                'cells',
-                stored.path,
-                ...size,
-                '--palette',
-                String(options.palette),
-                ...(usesOverlay ? ['--marker'] : []),
-              ])
-            ).cells
+        await (async () => {
+          const { cells } = await run<{ cells: string }>([
+            'cells',
+            stored.path,
+            ...size,
+            '--palette',
+            String(options.palette),
+            ...(usesOverlay ? ['--marker'] : []),
+          ])
+
+          if (!asText) {
+            return <Raster key={`inline-image-${index}`} columns={box.columns} rows={box.rows} cells={cells} />
           }
-        />
+
+          // The same cells as rows of coloured text, for a site that paints no Raster.
+          return (
+            <Box key={`inline-image-${index}`} flexDirection="column">
+              {cellRuns(cells, box.columns, box.rows).map((runs, row) => (
+                <Text key={`row-${row}`} wrap="truncate">
+                  {runs.map((part, at) => (
+                    <Text key={`run-${at}`} color={part.color} backgroundColor={part.backgroundColor}>
+                      {part.text}
+                    </Text>
+                  ))}
+                </Text>
+              ))}
+            </Box>
+          )
+        })()
       )
 
       return (
@@ -269,7 +317,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
             </Box>
           </Box>
           {/* Where the terminal sends no clicks, cmd+click on the caption opens it. */}
-          <Link href={fileUrl(opens)} label={caption(head, stored)} />
+          <Link href={fileUrl(opens)} label={label(pic, stored)} />
         </Box>
       )
     } catch (problem) {
@@ -281,6 +329,16 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
       }
 
       const reason = problem instanceof Error ? problem.message : String(problem)
+
+      if (pic.fallback !== undefined) {
+        // A diagram that will not draw: its source, as the reply wrote it, and why.
+        return (
+          <Box key={`inline-box-${index}`} flexDirection="column" paddingLeft={2}>
+            <Markdown text={pic.fallback} />
+            <Text dimColor>{`[${pic.title ?? 'diagram'} not drawn: ${reason}]`}</Text>
+          </Box>
+        )
+      }
 
       return (
         <Box key={`inline-box-${index}`} paddingLeft={2}>
@@ -308,6 +366,12 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
   await Promise.all(Array.from({ length: Math.min(PARALLEL, shown.length) }, worker))
 
+  // A slow first draw (a diagram rendered, an image decoded) is laid out but not
+  // always painted. Draw once more when it is ready: from the cache, so fast.
+  if ((await $.clock.now()) - startedAt > SLOW_DRAW_MS) {
+    $.clock.after(100, () => $.ui.invalidate('ui.render'))
+  }
+
   if (found.length > MAX_IMAGES) {
     nodes.push(
       <Box key="inline-more" paddingLeft={2}>
@@ -322,10 +386,126 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 export const register: Register = (on, settings) => {
   const hidesFromModel = settings.hide_from_model !== false
 
-  // In iTerm2, start the overlay that draws real pixels over the cell previews.
+  // Tell Claude that a ```mermaid block in a reply becomes a picture.
+  on('prompt.compose', async ($, e, next) => {
+    const composed = await next(e)
+    const options = readOptions(settings, $.plugin.root)
+
+    if (!options.mermaid || !canDrawMermaid || !e.surfaces.includes('terminal')) {
+      return composed
+    }
+
+    return { ...composed, sections: [...composed.sections, { id: 'inline-images:mermaid', text: MERMAID_GUIDE, scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
+
+  // Each complete ```mermaid block in a reply: drawn as a picture, in its place.
+  on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
+    const options = readOptions(settings, $.plugin.root)
+
+    if (!options.mermaid || e.surface !== 'terminal') {
+      return next(e)
+    }
+
+    const segments = splitMermaid(e.props.text)
+    const sources = segments.flatMap(segment => (segment.kind === 'mermaid' ? [segment.source] : []))
+
+    if (sources.length === 0) {
+      return next(e)
+    }
+
+    const { Box, Markdown, Text } = $.ui.resolve(e)
+    const pending = sources.filter(source => readyDiagrams.get(diagramKey(options.mermaidTheme, source)) === undefined)
+
+    // Render the new diagrams in the background, then draw the reply again.
+    for (const source of pending) {
+      const key = diagramKey(options.mermaidTheme, source)
+
+      void remember(inspected, key, async () => {
+        const ran = await $.process.run([options.python, options.helper, 'mermaid', '--theme', options.mermaidTheme], {
+          stdin: source,
+          timeoutMs: 120000,
+        })
+
+        return parseReply<Inspected>(ran.stdout, ran.stderr, ran.exitCode)
+      })
+        .then(
+          () => readyDiagrams.set(key, true),
+          // A failure is drawn too: the source and the reason, by previews.
+          () => readyDiagrams.set(key, true),
+        )
+        .finally(() => $.ui.invalidate('ui.render'))
+    }
+
+    // The ready diagrams in one call: one click layer key each. A reply's row
+    // paints no Raster, so the cells are drawn as coloured text.
+    const ready = sources.filter(source => !pending.includes(source))
+    const drawnReady = (await previews($, e, settings, ready.map(source => ({ mermaid: source })), true)).nodes
+    const nodes = sources.map(source => {
+      if (pending.includes(source)) {
+        return (
+          <Box key={`inline-pending-${diagramKey('', source)}`} paddingLeft={2}>
+            <Text dimColor>{`\u22ef drawing a ${mermaidKind(source)} diagram`}</Text>
+          </Box>
+        )
+      }
+
+      return drawnReady[ready.indexOf(source)]
+    })
+    const [first, ...rest] = segments
+    // The engine draws the first text (and the reply's bullet); the rest follows.
+    const base = await next({ ...e, props: { ...e.props, text: first?.kind === 'text' ? first.text : '' } })
+    const parts: ReturnType<typeof Box>[] = []
+    let drawn = first?.kind === 'mermaid' ? 1 : 0
+
+    if (first?.kind === 'mermaid' && nodes[0] !== undefined) {
+      parts.push(nodes[0])
+    }
+
+    rest.forEach((segment, index) => {
+      if (segment.kind === 'mermaid') {
+        const node = nodes[drawn++]
+
+        if (node !== undefined) {
+          parts.push(node)
+        }
+      } else if (segment.text.trim() !== '') {
+        parts.push(
+          <Box key={`inline-text-${index}`} paddingLeft={2}>
+            <Markdown text={segment.text} />
+          </Box>,
+        )
+      }
+    })
+
+    return (
+      <Box flexDirection="column">
+        {base}
+        {parts}
+      </Box>
+    )
+  }).catch(($, e, next) => next(e))
+
+  // At the start: can this machine draw Mermaid diagrams (only then is Claude
+  // told it can draw them)? And in iTerm2, start the overlay that draws real
+  // pixels over the cell previews.
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     const options = readOptions(settings, $.plugin.root)
+
+    if (options.mermaid) {
+      // A failed check only means no diagrams: it must not stop the overlay below.
+      const found = await $.process
+        .run([options.python, options.helper, 'mermaid-check'], { timeoutMs: 15000 })
+        .then(ran => parseReply<{ mmdc: string | null }>(ran.stdout, ran.stderr, ran.exitCode))
+        .catch(() => undefined)
+
+      canDrawMermaid = typeof found?.mmdc === 'string'
+
+      if (!canDrawMermaid) {
+        $.ui.log('inline-images: no mmdc, so Mermaid diagrams stay as text (npm install -g @mermaid-js/mermaid-cli)', { to: 'debug' })
+      }
+    }
+
     const sessionId = await $.env.get('ITERM_SESSION_ID')
 
     if (overlay !== 'off' || sessionId === undefined || !wantsOverlay(options.renderer, await $.env.get('TERM_PROGRAM'))) {

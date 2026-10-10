@@ -1,7 +1,7 @@
 {
   "name": "inline-images",
   "version": "0.3.0",
-  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), and the images Claude sends you, in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
+  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",
     "url": "https://github.com/chrisns"
@@ -10,15 +10,18 @@
   "repository": "https://github.com/chrisns/claude-image-cli-mod",
   "license": "MIT",
   "keywords": [
+    "diagrams",
+    "ghostty",
     "images",
     "imgcat",
-    "iterm2",
     "inline-images",
-    "osc-1337",
+    "iterm2",
     "kitty",
-    "ghostty",
+    "mermaid",
+    "osc-1337",
+    "preview",
     "terminal",
-    "preview"
+    "wardley-maps"
   ],
   "userConfig": {
     "renderer": {
@@ -62,6 +65,24 @@
       "type": "string",
       "default": "python3",
       "description": "The Python 3 that runs bin/render.py and bin/iterm_overlay.py. It needs Pillow (or ImageMagick installed), and the iterm2 module for real pixels in iTerm2."
+    },
+    "mermaid": {
+      "title": "Draw Mermaid diagrams",
+      "type": "boolean",
+      "default": true,
+      "description": "Draw each ```mermaid block in Claude's replies as a picture, and tell Claude that it can draw diagrams. Needs mmdc (npm install -g @mermaid-js/mermaid-cli) and a Chrome-family browser."
+    },
+    "mermaid_theme": {
+      "title": "Mermaid theme",
+      "type": "string",
+      "options": [
+        "default",
+        "neutral",
+        "dark",
+        "forest"
+      ],
+      "default": "default",
+      "description": "The Mermaid theme. Diagrams are drawn on white, which reads well on any terminal."
     }
   }
 }

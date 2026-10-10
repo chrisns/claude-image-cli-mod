@@ -27,11 +27,13 @@ type Helper = {
   calls: string[][]
   opened: string[][]
   fail?: (command: string) => string | undefined
+  noMermaid?: boolean
 }
 
 /** Answer every process the plugin runs: render.py's commands, and `open`. */
 function world(on: any, helper: Partial<Helper> = {}): Helper {
   const state: Helper = { calls: [], opened: [], ...helper }
+  mock.clock(on)
 
   on('process.run', (_$: unknown, e: Run) => {
     const [program, , command = '', ...rest] = e.argv
@@ -51,7 +53,11 @@ function world(on: any, helper: Partial<Helper> = {}): Helper {
     const value = (key: string) => rest[rest.indexOf(key) + 1]
     let reply: unknown
 
-    if (command === 'inspect') {
+    if (command === 'mermaid') {
+      reply = { ...STORED, path: '/cache/diagram.png', named: '/cache/named/d/flowchart.png', kind: 'flowchart' }
+    } else if (command === 'mermaid-check') {
+      reply = { ok: true, mmdc: state.noMermaid ? null : '/usr/local/bin/mmdc', browser: null }
+    } else if (command === 'inspect') {
       reply = STORED
     } else if (command === 'cell') {
       reply = { ok: true, width: 8, height: 16 }
@@ -314,5 +320,82 @@ describe('surfaces', () => {
     await $.ui.mount({ plugin: 'inline-images', surface: 'desktop', component: 'ToolGroup', props: group, viewport: VIEWPORT })
     await $.ui.mount({ plugin: 'inline-images', surface: 'terminal', component: 'ToolGroup', props: group, viewport: VIEWPORT })
     expect(rows).toEqual([false, true])
+  })
+})
+
+const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [], outputStyle: null, traits: [] }
+
+describe('Mermaid diagrams in replies', () => {
+  const reply = (text: string) => ({ text, isFirstOfReply: true })
+  const mountReply = ($: any, text: string, surface = 'terminal') =>
+    $.ui.mount({ plugin: 'inline-images', surface, component: 'AssistantMessage', props: reply(text), requestId: 'msg-1', viewport: VIEWPORT })
+
+  test('a complete diagram is drawn in its place, between the texts', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on)
+    const rows = engineRow(on)
+    const ui = await mountReply($, 'Before.\n```mermaid\nflowchart LR\n  A --> B\n```\nAfter.')
+
+    // A reply's row paints no Raster: the cells come as runs of coloured text.
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    const runs = await ui.findAll({ type: 'Text', text: /^\u2588+$/ })
+    expect(runs.some((run: { props: Record<string, unknown> }) => run.props.color === '#ff8800')).toBe(true)
+    expect((await ui.find({ type: 'Link' }))?.text).toContain('flowchart diagram')
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toBe('After.')
+    expect(helper.calls.find(([command]) => command === 'mermaid')).toEqual(['mermaid', '--theme', 'default'])
+    // Drawn first with a short line while the diagram renders, then with the picture.
+    expect(rows.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('a diagram that will not draw shows its source and the reason', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    world(on, { fail: command => (command === 'mermaid' ? 'Mermaid: syntax error in this flowchart diagram' : undefined) })
+    engineRow(on)
+    const ui = await mountReply($, '```mermaid\nflowchart LR\n  A -->\n```')
+
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toContain('A -->')
+    expect((await ui.find({ type: 'Text', text: /not drawn: Mermaid: syntax error/ })) !== undefined).toBe(true)
+  })
+
+  test('a diagram still being written is left to the engine', async ($, on) => {
+    const helper = world(on)
+    engineRow(on)
+    const ui = await mountReply($, 'Drawing:\n```mermaid\nflowchart LR')
+
+    expect(await ui.find({ type: 'Raster' })).toBeUndefined()
+    expect(helper.calls).toEqual([])
+  })
+
+  test('mermaid off leaves replies alone', { options: { mermaid: false } }, async ($, on) => {
+    const helper = world(on)
+    engineRow(on)
+    await mountReply($, '```mermaid\nflowchart LR\n  A --> B\n```')
+
+    expect(helper.calls).toEqual([])
+  })
+
+  test('Claude is told it can draw diagrams when mmdc is there', async ($, on) => {
+    world(on)
+    on('process.spawn', async function* () {
+      yield { stream: 'stdout', text: '' }
+    })
+    on('prompt.compose', () => ({ sections: [{ id: 'base', text: 'You are Claude.', scope: 'shared' }] }))
+    on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+    mock.env(on, {})
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    const { sections } = await $.prompt.compose(COMPOSE as never)
+
+    expect(sections.map((section: { id: string }) => section.id)).toEqual(['base', 'inline-images:mermaid'])
+  })
+
+  test('and not told when mmdc is missing', async ($, on) => {
+    world(on, { noMermaid: true })
+    on('prompt.compose', () => ({ sections: [{ id: 'base', text: 'You are Claude.', scope: 'shared' }] }))
+    on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+    mock.env(on, {})
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    const { sections } = await $.prompt.compose(COMPOSE as never)
+
+    expect(sections.map((section: { id: string }) => section.id)).toEqual(['base'])
   })
 })

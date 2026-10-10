@@ -8,6 +8,8 @@ export type Options = {
   python: string
   helper: string
   overlay: string
+  mermaid: boolean
+  mermaidTheme: 'default' | 'neutral' | 'dark' | 'forest'
 }
 
 export type Inspected = {
@@ -27,6 +29,10 @@ export type Pic = {
   inspect: () => Promise<Inspected>
   /** Drop what `inspect` remembers, so the next draw reads the image again. */
   forget: () => void
+  /** The caption, when it is not made from the file: a diagram's type. */
+  title?: string
+  /** Markdown to show when no picture can be drawn: a diagram's own source. */
+  fallback?: string
 }
 
 /**
@@ -167,6 +173,11 @@ export function readOptions(
     python: typeof options.python === 'string' && options.python !== '' ? options.python : 'python3',
     helper: `${root}/bin/render.py`,
     overlay: `${root}/bin/iterm_overlay.py`,
+    mermaid: options.mermaid !== false,
+    mermaidTheme:
+      options.mermaid_theme === 'neutral' || options.mermaid_theme === 'dark' || options.mermaid_theme === 'forest'
+        ? options.mermaid_theme
+        : 'default',
   }
 }
 
@@ -250,4 +261,48 @@ export function deliveredImages(output: unknown): string[] {
 
     return typeof path === 'string' && path !== '' && image ? [path] : []
   })
+}
+
+/** A run of cells in one row that share their colours: what one `Text` draws. */
+export type Run = { text: string; color?: string; backgroundColor?: string }
+
+const DEFAULT_COLOUR = 0x01000000
+
+/**
+ * The cells of a grid (render.py's packed u32 triplets: code point, foreground,
+ * background) as rows of coloured runs. Some sites draw no `Raster` (a reply's
+ * message row lays one out but never paints it); runs of `Text` draw anywhere.
+ */
+export function cellRuns(cells: string, columns: number, rows: number): Run[][] {
+  const bytes = Uint8Array.fromBase64(cells)
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const hex = (value: number) => (value === DEFAULT_COLOUR ? undefined : `#${value.toString(16).padStart(6, '0')}`)
+  const lines: Run[][] = []
+
+  for (let row = 0; row < rows; row++) {
+    const runs: Run[] = []
+
+    for (let column = 0; column < columns; column++) {
+      const at = (row * columns + column) * 12
+
+      if (at + 12 > view.byteLength) {
+        break
+      }
+
+      const glyph = String.fromCharCode(view.getUint32(at, true))
+      const color = hex(view.getUint32(at + 4, true))
+      const backgroundColor = hex(view.getUint32(at + 8, true))
+      const last = runs[runs.length - 1]
+
+      if (last !== undefined && last.color === color && last.backgroundColor === backgroundColor) {
+        last.text += glyph
+      } else {
+        runs.push({ text: glyph, color, backgroundColor })
+      }
+    }
+
+    lines.push(runs)
+  }
+
+  return lines
 }

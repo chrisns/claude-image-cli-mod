@@ -637,3 +637,59 @@ class InProcessTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HAVE_MMDC = shutil.which("mmdc") is not None and render.find_browser() is not None
+
+
+class MermaidTests(unittest.TestCase):
+    def test_kind_skips_front_matter_and_comments(self):
+        self.assertEqual(render.mermaid_kind("---\ntitle: x\n---\n%% note\nwardley-beta\n"), "wardley-beta")
+        self.assertEqual(render.mermaid_kind("  sequenceDiagram\n  A->>B: hi"), "sequenceDiagram")
+        self.assertEqual(render.mermaid_kind(""), "diagram")
+
+    def test_error_text_keeps_the_message_and_drops_the_stack(self):
+        stderr = "Error: Parse error on line 2:\nA -->\n----^\n    at Parser.parseError (x.js:1)\n"
+        self.assertEqual(render.mermaid_error(stderr), "Parse error on line 2: A --> ----^")
+
+    def test_without_mmdc_it_says_what_to_install(self):
+        code, reply = run("mermaid", stdin="flowchart LR\n A --> B\n", env={"PATH": "/usr/bin:/bin"})
+        self.assertNotEqual(code, 0)
+        self.assertIn("npm install -g @mermaid-js/mermaid-cli", reply["error"])
+
+    def test_an_empty_or_huge_diagram_is_refused(self):
+        self.assertIn("empty", run("mermaid", stdin="  \n")[1]["error"])
+        self.assertIn("longer than", run("mermaid", stdin="x" * (render.MERMAID_MAX_SOURCE + 1))[1]["error"])
+
+    def test_check_reports_what_it_found(self):
+        code, reply = run("mermaid-check")
+        self.assertEqual(code, 0)
+        self.assertEqual(set(reply), {"ok", "mmdc", "browser"})
+
+    @unittest.skipUnless(HAVE_MMDC, "mmdc and a browser are needed")
+    def test_a_flowchart_draws_and_is_named_for_its_kind(self):
+        code, reply = run("mermaid", stdin="flowchart LR\n  A --> B\n")
+        self.assertEqual(code, 0, reply)
+        self.assertEqual((reply["format"], reply["kind"]), ("PNG", "flowchart"))
+        self.assertTrue(reply["named"].endswith("flowchart.png"))
+
+        # Drawn once: the second time comes from the cache, and says the same.
+        again = run("mermaid", stdin="flowchart LR\n  A --> B\n")[1]
+        self.assertEqual(again["path"], reply["path"])
+
+    @unittest.skipUnless(HAVE_MMDC, "mmdc and a browser are needed")
+    def test_a_wardley_map_draws(self):
+        source = "wardley-beta\ntitle Tea\nanchor Business [0.95, 0.63]\ncomponent Tea [0.63, 0.81]\nBusiness -> Tea\n"
+        code, reply = run("mermaid", stdin=source)
+        self.assertEqual(code, 0, reply)
+        self.assertEqual(reply["kind"], "wardley-beta")
+
+    @unittest.skipUnless(HAVE_MMDC, "mmdc and a browser are needed")
+    def test_syntax_errors_are_errors_even_where_mmdc_exits_0(self):
+        code, reply = run("mermaid", stdin="flowchart LR\n A -->\n")
+        self.assertNotEqual(code, 0)
+        self.assertIn("Parse error", reply["error"])
+
+        code, reply = run("mermaid", stdin="wardley-beta\nthis is not a map {{{\n")
+        self.assertNotEqual(code, 0)
+        self.assertIn("syntax error in this wardley-beta diagram", reply["error"])

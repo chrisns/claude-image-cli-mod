@@ -75,6 +75,8 @@ describe('options', () => {
       python: 'python3',
       helper: '/mod/bin/render.py',
       overlay: '/mod/bin/iterm_overlay.py',
+      mermaid: true,
+      mermaidTheme: 'default',
     })
   })
 

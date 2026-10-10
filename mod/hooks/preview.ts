@@ -9,6 +9,7 @@ export type Options = {
   helper: string
   overlay: string
   mermaid: boolean
+  diagramMaxRows: number
   mermaidTheme: 'default' | 'neutral' | 'dark' | 'forest'
 }
 
@@ -174,6 +175,7 @@ export function readOptions(
     helper: `${root}/bin/render.py`,
     overlay: `${root}/bin/iterm_overlay.py`,
     mermaid: options.mermaid !== false,
+    diagramMaxRows: Math.round(Math.max(1, Math.min(255, number(options.diagram_max_rows, 40)))),
     mermaidTheme:
       options.mermaid_theme === 'neutral' || options.mermaid_theme === 'dark' || options.mermaid_theme === 'forest'
         ? options.mermaid_theme

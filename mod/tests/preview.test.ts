@@ -76,6 +76,7 @@ describe('options', () => {
       helper: '/mod/bin/render.py',
       overlay: '/mod/bin/iterm_overlay.py',
       mermaid: true,
+      diagramMaxRows: 40,
       mermaidTheme: 'default',
     })
   })

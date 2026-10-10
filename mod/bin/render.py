@@ -1248,14 +1248,23 @@ def mermaid_error(stderr):
     plain = re.sub(r"\x1b\[[0-9;]*m", "", stderr)
     lines = [line.rstrip() for line in plain.splitlines()]
 
+    def readable(text):
+        # Stop at a stack frame or a URL: noise, and it can carry a local path.
+        return re.split(r"(?:^|\s)(?:at |https?://)", text.strip())[0].strip()
+
     for index, line in enumerate(lines):
         if line.startswith("Error:"):
-            useful = [line[len("Error:"):].strip()] + [
-                text for text in lines[index + 1 : index + 4] if text and not text.lstrip().startswith("at ")
-            ]
+            useful = [readable(line[len("Error:"):])]
+
+            for text in lines[index + 1 : index + 4]:
+                if not text.strip() or re.match(r"\s*(?:at |https?://)", text):
+                    break
+
+                useful.append(readable(text))
+
             return " ".join(part for part in useful if part)[:300]
 
-    return (plain.strip().splitlines() or ["mmdc failed"])[-1][:300]
+    return readable((plain.strip().splitlines() or ["mmdc failed"])[-1])[:300] or "mmdc failed"
 
 
 def run_mmdc(tool, browser, source_path, out_path, arguments):

@@ -652,6 +652,10 @@ class MermaidTests(unittest.TestCase):
         stderr = "Error: Parse error on line 2:\nA -->\n----^\n    at Parser.parseError (x.js:1)\n"
         self.assertEqual(render.mermaid_error(stderr), "Parse error on line 2: A --> ----^")
 
+    def test_error_text_drops_urls_and_local_paths(self):
+        stderr = 'Error: Pipeline "Delivery" must reference a component.\nhttps://intercept.invalid/Users/me/x.mjs:140:13 Array.forEach\n'
+        self.assertEqual(render.mermaid_error(stderr), 'Pipeline "Delivery" must reference a component.')
+
     def test_without_mmdc_it_says_what_to_install(self):
         code, reply = run("mermaid", stdin="flowchart LR\n A --> B\n", env={"PATH": "/usr/bin:/bin"})
         self.assertNotEqual(code, 0)

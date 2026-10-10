@@ -146,6 +146,7 @@ deaccelerator Regulation [0.30, 0.25]
 - \`anchor\` is a user or need; \`component\` a capability. Names may contain spaces; quote a name that has other punctuation.
 - \`A -> B\` is a dependency; \`A +> B\` a flow; \`A -> B ; text\` labels the link.
 - \`evolve Name 0.62\` moves a component to a new evolution; \`pipeline Name { component Option [evolution] }\` shows options.
+- Declare every name before you use it: a link, \`evolve\` or \`pipeline\` that names a component not declared with \`component Name [v, e]\` is an error. A pipeline's own options are declared inside it.
 - After a component's coordinates: \`label [x, y]\` offsets its label, \`inertia\` marks resistance, and \`(build)\`, \`(buy)\` or \`(outsource)\` marks the sourcing method.
 - \`note "text" [v, e]\` adds a note; \`annotations [v, e]\` places the annotation list and \`annotation 1,[v, e] "text"\` numbers a point.
 - \`size [width, height]\` and \`evolution A -> B -> C -> D\` are optional.

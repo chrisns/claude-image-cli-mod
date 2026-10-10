@@ -28,25 +28,12 @@ spec.loader.exec_module(crop)
 
 def cut_row(image):
     """The y where the input box starts, found as crop-screenshot.py finds it."""
-    pixels = image.load()
-    width, height = image.size
-    groups = []
+    top = crop.input_box_top(image)
 
-    for y in range(height - 1, height // 2, -1):
-        if crop.is_rule(pixels, width, y):
-            if groups and groups[-1][-1] - y <= 1:
-                groups[-1].append(y)
-            else:
-                groups.append([y])
-
-    bars = [group[-1] for group in groups if len(group) > 2]
-    above = [group for group in groups if not bars or group[0] < min(bars)]
-    thin = [group for group in above if len(group) <= 2]
-
-    if len(thin) < 2:
+    if top is None:
         raise SystemExit("could not find the input box in the last frame")
 
-    return thin[1][-1] - 4
+    return top - 4
 
 
 TITLE = 24  # the height of the window's title bar, in points
@@ -65,6 +52,13 @@ def hide_banner(frame, scale):
 
     for y in range(title + 4 * scale, height // 2):
         if crop.is_rule(pixels, width, y):
+            # The prompt bar is dark grey. A white or coloured uniform row is a
+            # picture in the transcript: then there is no banner above it to hide.
+            red, green, blue = pixels[width // 2, y][:3]
+
+            if not all(25 <= channel <= 110 for channel in (red, green, blue)):
+                return frame
+
             if y - title > 30 * scale:
                 frame.paste((0, 0, 0), (0, title + 2 * scale, width, y - 6 * scale))
             return frame

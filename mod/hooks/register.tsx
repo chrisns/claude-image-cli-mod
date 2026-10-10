@@ -252,7 +252,8 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
         maxColumns: options.maxColumns,
         // The viewport's height is no cap: it is what the window was when the row was
         // first drawn, and a change of height alone does not draw the row again.
-        maxRows: options.maxRows,
+        // A diagram carries small text: it may be taller than an image.
+        maxRows: pic.fallback === undefined ? options.maxRows : options.diagramMaxRows,
         cell: cell ?? DEFAULT_CELL,
       })
       const size = [
@@ -310,11 +311,13 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
       return (
         <Box key={`inline-box-${index}`} flexDirection="column" paddingLeft={2}>
           <Box width={box.columns} height={box.rows}>
-            {drawn}
-            {/* A click on the picture opens the file in the system's own viewer. */}
+            {/* A click on the picture opens the file in the system's own viewer. The
+                layer comes first: drawn after the picture, its empty region would paint
+                over a picture made of text, as in a reply. */}
             <Box position="absolute" top={0} left={0} width={box.columns} height={box.rows}>
               <Client key={layer} module="./click.tsx" width={box.columns} height={box.rows} />
             </Box>
+            {drawn}
           </Box>
           {/* Where the terminal sends no clicks, cmd+click on the caption opens it. */}
           <Link href={fileUrl(opens)} label={label(pic, stored)} />

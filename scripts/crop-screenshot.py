@@ -24,6 +24,32 @@ def is_rule(pixels, width, y):
     return first != (0, 0, 0) and same >= 0.985 * len(row)
 
 
+def input_box_top(image):
+    """The y of the upper rule of Claude Code's input box, or None.
+
+    Rules are rows of one colour from edge to edge. iTerm2's status bar is a
+    thick block of them at the very bottom; the input box has a thin rule above
+    and below it. A white picture in the transcript is thick and uniform too, so
+    only thick groups near the bottom count as status bars.
+    """
+    pixels = image.load()
+    width, height = image.size
+    groups = []
+
+    for y in range(height - 1, height // 2, -1):
+        if is_rule(pixels, width, y):
+            if groups and groups[-1][-1] - y <= 1:
+                groups[-1].append(y)
+            else:
+                groups.append([y])
+
+    bars = [group[-1] for group in groups if len(group) > 2 and group[0] > height * 0.85]
+    above = [group for group in groups if not bars or group[0] < min(bars)]
+    thin = [group for group in above if len(group) <= 2]
+
+    return thin[1][-1] if len(thin) >= 2 else None
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("source")
@@ -36,29 +62,15 @@ def main():
     pixels = image.load()
     width, height = image.size
 
-    # Group the rows that are rules. iTerm's status bar is a thick block of them at
-    # the bottom; the input box has a thin rule above and below it.
-    groups = []
+    top = input_box_top(image)
 
-    for y in range(height - 1, height // 2, -1):
-        if is_rule(pixels, width, y):
-            if groups and groups[-1][-1] - y <= 1:
-                groups[-1].append(y)
-            else:
-                groups.append([y])
-
-    # Everything at or below the highest thick group belongs to the status bars.
-    bars = [group[-1] for group in groups if len(group) > 2]
-    above = [group for group in groups if not bars or group[0] < min(bars)]
-    thin = [group for group in above if len(group) <= 2]
-
-    if len(thin) < 2:
+    if top is None:
         raise SystemExit("could not find the input box")
 
     # The upper rule of the input box, less the line above it, where Claude Code
     # puts the spinner and notices (usage limits) that do not belong in a README.
     scale = 2 if width >= 1200 else 1  # a Retina capture has two pixels per point
-    cut = thin[1][-1] - 4 - arguments.line * scale
+    cut = top - 4 - arguments.line * scale
     image = image.crop((0, 0, width, cut))
 
     if image.width > arguments.width:

@@ -7,7 +7,7 @@
 
 inline-images is a mod for [Claude Code](https://claude.com/claude-code). Many command-line tools print images with the [iTerm2 inline images protocol](https://iterm2.com/documentation-images.html): `imgcat`, `it2cat`, `chafa -f iterm`, `timg -p iterm`, `wezterm imgcat`, matplotlib backends and more. Claude Code does not show these images. You see "Ran 1 shell command", and the model reads a wall of base64.
 
-This mod shows each image under the tool call that printed it. It also shows the images that Claude sends to you.
+This mod shows each image under the tool call that printed it. It also shows the images that Claude sends to you. And it draws the Mermaid diagrams that Claude writes, Wardley maps included.
 
 | Without the mod | With the mod |
 |---|---|
@@ -70,12 +70,36 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 - **Previews in the transcript.** Each image appears under the tool call that printed it, with its name, size and format.
 - **Real pixels.** iTerm2, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
 - **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery. [See it](#images-that-claude-sends).
+- **Diagrams.** Claude can draw Mermaid diagrams: flowcharts, sequence diagrams, ER diagrams, Gantt charts, mind maps, Wardley maps and more. Each one appears as a picture in Claude's reply. [See them](#diagrams).
 - **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
 - **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, shown to the user]`, not 190,000 characters of base64.
 - **Large images.** Claude Code cuts tool output at 30,000 characters. The mod reads the whole output from the file where Claude Code saves it.
 - **The right shape.** The mod measures your terminal's cell size and keeps the picture's aspect ratio.
 - **The whole protocol.** `File=`, chunked `MultipartFile`, the tmux passthrough wrapper, the `BEL` and `ST` terminators, `width`, `height` and `preserveAspectRatio`. A download (`inline=0`) is not shown, and its note says so.
 - **Transparency** and several images in one command.
+
+### Diagrams
+
+Ask Claude for a diagram, and it draws one. The mod tells Claude that it can, and how to write a Wardley map:
+
+![Claude draws a Wardley map of an online bookshop, and the map appears in the reply](docs/screenshots/mermaid-wardley.gif)
+
+Every Mermaid diagram type works. These four came from four one-line requests:
+
+![A sequence diagram, an ER diagram, a mind map and a Gantt chart, each drawn in a Claude reply](docs/screenshots/mermaid-gallery.png)
+
+- Each complete ```` ```mermaid ```` block in a reply becomes a picture in its place. The text around it stays text.
+- A new diagram shows a short "drawing a … diagram" line for a second or two, then the picture.
+- A diagram with an error shows its source and the reason.
+- Click a diagram to open it full size.
+
+Diagrams need [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) and a Chrome-family browser (Chrome, Chromium, Edge or Brave):
+
+```
+npm install -g @mermaid-js/mermaid-cli
+```
+
+Without `mmdc`, Claude is not told about diagrams, and ```` ```mermaid ```` blocks stay as text.
 
 ### Images that Claude sends
 
@@ -112,6 +136,9 @@ Change the options in the config menu of Claude Code, or under `pluginConfigs` i
 | `max_columns` | `100` | The widest that a preview can be, from 1 to 255 columns. A preview is never wider than the transcript. |
 | `max_rows` | `28` | The tallest that a preview can be, from 1 to 255 rows. |
 | `palette` | `0` | Reduce a block preview to this many colours, from 0 to 256. `0` keeps all colours. A value near `32` can look cleaner on a busy picture. |
+| `mermaid` | `true` | Draw ```` ```mermaid ```` blocks in replies as pictures, and tell Claude that it can draw diagrams. |
+| `mermaid_theme` | `default` | The Mermaid theme: `default`, `neutral`, `dark` or `forest`. Diagrams are drawn on white. |
+| `diagram_max_rows` | `40` | The tallest that a diagram can be, from 1 to 255 rows. Diagrams carry small text, so they may be taller than images. |
 | `hide_from_model` | `true` | Replace the image data in the tool result with a short note. |
 | `python` | `python3` | The Python 3 that runs the helper and the iTerm2 overlay. |
 
@@ -122,7 +149,8 @@ Change the options in the config menu of Claude Code, or under `pluginConfigs` i
 3. [`mod/bin/render.py`](mod/bin/render.py) decodes the image and scales it to fit a box of cells. It reads the cell size from the terminal with `TIOCGWINSZ`.
 4. The mod draws the box with the renderer that your terminal supports.
 5. A transparent click layer ([`mod/hooks/click.tsx`](mod/hooks/click.tsx)) lies over each picture. A click opens the picture.
-6. A `session.append` hook removes the image data from what the model reads. The transcript keeps the whole output, so the preview comes back when you resume a session.
+6. A `prompt.compose` hook adds a short guide to Claude's system prompt: a ```` ```mermaid ```` block becomes a picture, and this is the Wardley map syntax. `render.py mermaid` draws each block with `mmdc` and caches the picture by its source.
+7. A `session.append` hook removes the image data from what the model reads. The transcript keeps the whole output, so the preview comes back when you resume a session.
 
 ### Real pixels in iTerm2
 
@@ -156,6 +184,8 @@ Claude Code repaints only the cells that it thinks have changed. An image that i
 - `not a supported image format`: the mod draws only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO.
 - `the image is too large`: the image has more than 40 million pixels, which is too many to decode safely.
 
+**A diagram stays as text, or says `not drawn`.** Check that `mmdc --version` works in the shell that starts Claude Code. The text after `not drawn:` is Mermaid's own error message. To have Claude fix the diagram, paste that message back to it.
+
 **iTerm2 shows blocks, not real pixels.**
 
 1. Check that `python3 -c "import iterm2"` works in the Python that the `python` option names.
@@ -176,7 +206,9 @@ To see why the overlay is off, set the `renderer` option to `iterm`. A message t
 
 **Where does the mod keep the images?** In your user cache folder: `~/Library/Caches/inline-images` on macOS, or `~/.cache/inline-images` on Linux. Only your user can read the folder. The mod deletes files that are older than 24 hours.
 
-**Does it send anything over the network?** No.
+**Does it send anything over the network?** No. Diagrams are drawn by `mmdc` in a local browser.
+
+**Can I turn the diagrams off?** Yes. Set the `mermaid` option to `false`.
 
 **Is it safe to show an image from an unknown source?** The mod treats all tool output as untrusted. See [Security](#security).
 

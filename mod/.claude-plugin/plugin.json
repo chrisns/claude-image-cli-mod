@@ -1,6 +1,6 @@
 {
   "name": "inline-images",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",
@@ -71,6 +71,12 @@
       "type": "boolean",
       "default": true,
       "description": "Draw each ```mermaid block in Claude's replies as a picture, and tell Claude that it can draw diagrams. Needs mmdc (npm install -g @mermaid-js/mermaid-cli) and a Chrome-family browser."
+    },
+    "diagram_max_rows": {
+      "title": "Tallest diagram (rows)",
+      "type": "number",
+      "default": 40,
+      "description": "A diagram never takes more rows than this. Diagrams carry small text, so they may be taller than images."
     },
     "mermaid_theme": {
       "title": "Mermaid theme",

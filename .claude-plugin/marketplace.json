@@ -8,8 +8,8 @@
     {
       "name": "inline-images",
       "source": "./mod",
-      "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), and the images Claude sends you, in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else."
+      "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else."
     }
   ],
-  "description": "A Claude Code mod that previews inline images from imgcat and similar tools."
+  "description": "A Claude Code mod that previews inline images from imgcat and similar tools, and draws Mermaid diagrams."
 }

@@ -731,6 +731,12 @@ async def watch(connection, session_id, parent):
     for task in tasks:
         task.cancel()
 
+    # The screen stream failed (iTerm2 quit, the API was turned off): say why,
+    # for the mod's message, rather than end with no reason.
+    if tasks[0].done() and not tasks[0].cancelled() and tasks[0].exception() is not None:
+        problem = tasks[0].exception()
+        emit({"ok": False, "error": "the iTerm2 screen stream stopped: %s: %s" % (type(problem).__name__, problem)})
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

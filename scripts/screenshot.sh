@@ -51,7 +51,13 @@ unsent() { screen | grep "^❯" | tail -1 | sed 's/^❯[[:space:] ]*//' | grep -
 # Send the prompt. The paste can take the first Return; another goes only
 # while the prompt is still unsent, never into a dialog that opened meanwhile.
 submit() {
-  osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text \"$1\""
+  # The prompt goes as an argument, never into the script's source: a quote
+  # or a backslash in it is typed as it is.
+  osascript - "$id" "$1" <<'OSA'
+on run argv
+  tell application "iTerm" to tell current session of window id (item 1 of argv as integer) to write text (item 2 of argv)
+end run
+OSA
   sleep 1.5
   press
 

@@ -1,6 +1,6 @@
 {
   "name": "inline-images",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",

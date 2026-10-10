@@ -635,10 +635,6 @@ class InProcessTests(unittest.TestCase):
         self.assertTrue(all(plain[at : at + 4] in source for at in range(0, len(plain), 4)))  # no new colours
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 HAVE_MMDC = shutil.which("mmdc") is not None and render.find_browser() is not None
 
 
@@ -697,3 +693,88 @@ class MermaidTests(unittest.TestCase):
         code, reply = run("mermaid", stdin="wardley-beta\nthis is not a map {{{\n")
         self.assertNotEqual(code, 0)
         self.assertIn("syntax error in this wardley-beta diagram", reply["error"])
+
+    def test_a_small_picture_stays_when_its_svg_check_fails(self):
+        # A picture with the size of Mermaid's error picture is checked again as
+        # SVG. When that check cannot run, the picture is kept, not an error raised.
+        folder = tempfile.mkdtemp(dir=WORK.name)
+        picture = os.path.join(folder, "small.png")
+
+        with open(picture, "wb") as handle:
+            handle.write(png(*(size * render.MERMAID_SCALE for size in render.MERMAID_ERROR_SIZE), (255, 255, 255, 255)))
+
+        fake = os.path.join(folder, "mmdc")
+
+        with open(fake, "w") as handle:
+            handle.write(
+                "#!/bin/sh\n"
+                'while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done\n'
+                'case "$out" in *.svg) echo "Error: no SVG today" >&2; exit 1;; esac\n'
+                'cp "%s" "$out"\n' % picture
+            )
+
+        os.chmod(fake, 0o755)
+        code, reply = run("mermaid", stdin="flowchart LR\n  A\n", env={"PATH": folder + ":/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"})
+        self.assertEqual(code, 0, reply)
+        self.assertEqual(reply["format"], "PNG")
+
+
+
+class OpenTests(unittest.TestCase):
+    """`open`: a click on a preview opens the stored copy in the system's viewer."""
+
+    def setUp(self):
+        # A fake `open` and `xdg-open` that write down what they were asked to open.
+        self.bin = tempfile.mkdtemp(dir=WORK.name)
+        self.log = os.path.join(self.bin, "opened.txt")
+
+        for opener in ("open", "xdg-open"):
+            path = os.path.join(self.bin, opener)
+
+            with open(path, "w") as handle:
+                handle.write('#!/bin/sh\necho "%s $1" >> "%s"\n' % (opener, self.log))
+
+            os.chmod(path, 0o755)
+
+        self.env = {"PATH": self.bin + ":/usr/bin:/bin"}
+
+    def opened(self):
+        with contextlib.suppress(FileNotFoundError), open(self.log) as handle:
+            return handle.read().splitlines()
+
+        return []
+
+    def test_a_stored_image_opens_with_the_systems_opener(self):
+        stored = run("inspect", stdin=png_base64(4, 4, (1, 2, 3, 255)))[1]["path"]
+        code, reply = run("open", stored, env=self.env)
+        self.assertEqual(code, 0, reply)
+        opener = "open" if sys.platform == "darwin" else "xdg-open"
+        self.assertEqual(self.opened(), ["%s %s" % (opener, stored)])
+
+    def test_a_file_outside_the_cache_is_never_opened(self):
+        outside = os.path.join(self.bin, "elsewhere.png")
+
+        with open(outside, "wb") as handle:
+            handle.write(png(4, 4, (1, 2, 3, 255)))
+
+        code, reply = run("open", outside, env=self.env)
+        self.assertNotEqual(code, 0)
+        self.assertIn("not in the cache", reply["error"])
+        self.assertEqual(self.opened(), [])
+
+    def test_a_link_out_of_the_cache_is_never_opened(self):
+        target = os.path.join(self.bin, "target.png")
+
+        with open(target, "wb") as handle:
+            handle.write(png(4, 4, (1, 2, 3, 255)))
+
+        link = os.path.join(render.cache_dir(), "link.png")
+        os.symlink(target, link)
+        self.addCleanup(os.remove, link)
+        code, reply = run("open", link, env=self.env)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(self.opened(), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

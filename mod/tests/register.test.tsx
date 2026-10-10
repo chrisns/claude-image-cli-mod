@@ -28,22 +28,42 @@ type Helper = {
   opened: string[][]
   fail?: (command: string) => string | undefined
   noMermaid?: boolean
+  /** Milliseconds a command takes, as the plugin's clock reads them. */
+  slow?: (command: string) => number
+  clock: ReturnType<typeof mock.clock>
+  /** How far the commands have moved the plugin's clock past the mocked one. */
+  spent: number
 }
 
 /** Answer every process the plugin runs: render.py's commands, and `open`. */
 function world(on: any, helper: Partial<Helper> = {}): Helper {
-  const state: Helper = { calls: [], opened: [], ...helper }
-  mock.clock(on)
+  const state = { calls: [], opened: [], ...helper, spent: 0 } as Helper
+  // The plugin reads the mocked time plus what the commands spent. A command
+  // that waited on the mocked clock would never end: an advance waits for the
+  // draws under way, and a draw would wait for the advance.
+  state.clock = mock.clock((event: string, handler: (...args: unknown[]) => unknown) =>
+    on(event, event !== 'clock.now' ? handler : async (...args: unknown[]) => {
+      const answer = (await handler(...args)) as { value: number }
 
-  on('process.run', (_$: unknown, e: Run) => {
+      return { ...answer, value: answer.value + state.spent }
+    }),
+  )
+
+  on('process.run', async (_$: unknown, e: Run) => {
     const [program, , command = '', ...rest] = e.argv
 
     if (program === 'open' || program === 'xdg-open') {
-      state.opened.push([...e.argv])
-      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+      // The helper opens files: the mod never runs a system opener itself.
+      throw new Error(`the mod ran ${program} itself`)
+    }
+
+    if (command === 'open') {
+      state.opened.push([...rest])
     }
 
     state.calls.push([command, ...rest])
+    state.spent += state.slow?.(command) ?? 0
+
     const failure = state.fail?.(command)
 
     if (failure !== undefined) {
@@ -131,7 +151,7 @@ describe('a Bash result that printed an image', () => {
 
     await ui.pointer({ type: 'down', x: 2, y: 1, button: 'left' })
     await ui.pointer({ type: 'up', x: 2, y: 1, button: 'left' })
-    expect(helper.opened).toEqual([['open', '/cache/named/abc/earth.jpg']])
+    expect(helper.opened).toEqual([['/cache/named/abc/earth.jpg']])
   })
 
   test('a click that ends outside the picture opens nothing', async ($, on) => {
@@ -154,6 +174,24 @@ describe('a Bash result that printed an image', () => {
 
     expect((await ui.find({ type: 'Text', text: /no preview: no image decoder/ }))?.text).toContain('earth.jpg')
     expect(helper.calls.filter(([command]) => command === 'inspect')).toHaveLength(2)
+  })
+
+  test('a slow draw that fails asks for one more draw, not an endless loop of them', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    // Two tries of 450 ms: slower than the 800 ms that asks for a redraw.
+    const helper = world(on, {
+      fail: command => (command === 'inspect' ? 'no image decoder' : undefined),
+      slow: command => (command === 'inspect' ? 450 : 0),
+    })
+    engineRow(on)
+    await mountRow($, bash(image()))
+
+    for (let step = 0; step < 5; step++) {
+      await helper.clock.advance(200)
+    }
+
+    // The first draw (an attempt and its retry), then the one redraw it asked for.
+    expect(helper.calls.filter(([command]) => command === 'inspect')).toHaveLength(4)
   })
 
   test('an errored row is left alone', async ($, on) => {
@@ -251,6 +289,27 @@ describe('large outputs', () => {
     expect(helper.calls.filter(([command]) => command === 'scan')).toEqual([['scan', '/tmp/out.txt']])
     expect((rows[0] as { stdout: string }).stdout).toBe('(2 inline images)')
   })
+
+  test('a picture whose stored copy was pruned is scanned again', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    let pruned = true
+    const helper = world(on, {
+      fail: command => {
+        if (command === 'cells' && pruned) {
+          pruned = false
+          return 'the stored image is gone'
+        }
+
+        return undefined
+      },
+    })
+    engineRow(on)
+    const cut = `${ESC}]1337;MultipartFile=inline=1${BEL}${ESC}]1337;FilePart=AAAA`
+    const ui = await mountRow($, bash(cut, { persistedOutputPath: '/tmp/out.txt' }))
+
+    expect(await ui.findAll({ type: 'Raster' })).toHaveLength(2)
+    expect(helper.calls.filter(([command]) => command === 'scan')).toHaveLength(2)
+  })
 })
 
 describe('the result line of a tool row', () => {
@@ -327,8 +386,8 @@ const COMPOSE = { model: 'm', promptModel: 'm', surfaces: ['terminal'], tools: [
 
 describe('Mermaid diagrams in replies', () => {
   const reply = (text: string) => ({ text, isFirstOfReply: true })
-  const mountReply = ($: any, text: string, surface = 'terminal') =>
-    $.ui.mount({ plugin: 'inline-images', surface, component: 'AssistantMessage', props: reply(text), requestId: 'msg-1', viewport: VIEWPORT })
+  const mountReply = ($: any, text: string, surface = 'terminal', requestId = 'msg-1') =>
+    $.ui.mount({ plugin: 'inline-images', surface, component: 'AssistantMessage', props: reply(text), requestId, viewport: VIEWPORT })
 
   test('a complete diagram is drawn in its place, between the texts', async ($, on) => {
     mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
@@ -355,6 +414,46 @@ describe('Mermaid diagrams in replies', () => {
 
     expect((await ui.find({ type: 'Markdown' }))?.props.text).toContain('A -->')
     expect((await ui.find({ type: 'Text', text: /not drawn: Mermaid: syntax error/ })) !== undefined).toBe(true)
+  })
+
+  test('a diagram that will not draw is not sent to Mermaid again at each redraw', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on, { fail: command => (command === 'mermaid' ? 'Mermaid: syntax error' : undefined) })
+    engineRow(on)
+    const text = '```mermaid\nflowchart LR\n  A -->\n```'
+    await mountReply($, text, 'terminal', 'msg-1')
+    await mountReply($, text, 'terminal', 'msg-2')
+    const ui = await mountReply($, text, 'terminal', 'msg-3')
+
+    expect(helper.calls.filter(([command]) => command === 'mermaid')).toHaveLength(1)
+    expect((await ui.find({ type: 'Text', text: /not drawn: Mermaid: syntax error/ })) !== undefined).toBe(true)
+  })
+
+  test('the same diagram twice in one reply is drawn twice, each with its own click layer', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    world(on)
+    engineRow(on)
+    const block = '```mermaid\nflowchart LR\n  A --> B\n```'
+    const ui = await mountReply($, `${block}\nAgain:\n${block}`)
+    const layers = await ui.findAll({ type: 'Client' })
+
+    expect(await ui.findAll({ type: 'Link' })).toHaveLength(2)
+    expect(new Set(layers.map((layer: { key?: string }) => layer.key)).size).toBe(2)
+  })
+
+  test('past 16 diagrams in one reply, the rest stay as their source', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    world(on)
+    engineRow(on)
+    const blocks = Array.from({ length: 18 }, (_, index) => `\`\`\`mermaid\nflowchart LR\n  A${index} --> B\n\`\`\``)
+    const ui = await mountReply($, blocks.join('\n'))
+    const texts = (await ui.findAll({ type: 'Markdown' })).map((markdown: { props: { text: string } }) => markdown.props.text).join('\n')
+
+    expect(await ui.findAll({ type: 'Link' })).toHaveLength(16)
+    expect(texts).toContain('A16 --> B')
+    expect(texts).toContain('A17 --> B')
+    expect(texts).not.toContain('A15 --> B')
+    expect((await ui.find({ type: 'Text', text: /not shown/ })) === undefined).toBe(true)
   })
 
   test('a diagram still being written is left to the engine', async ($, on) => {

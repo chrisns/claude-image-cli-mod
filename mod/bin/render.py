@@ -15,6 +15,8 @@ image decoder. Each command prints one line of JSON on stdout:
             terminal that draws real pixels (kitty, Ghostty).
   cell      Measure one terminal cell in pixels, from the window size that the
             terminal reports on the tty of this process or of a parent.
+  open      Open a stored image in the system's viewer (`open` on macOS,
+            `xdg-open` elsewhere), for a click on its preview.
 
 `cells --marker` is for iTerm2. It hides an id in the first cells of the grid
 and keeps a PNG of the box. bin/iterm_overlay.py finds the id on the screen
@@ -1340,12 +1342,14 @@ def command_mermaid(arguments):
                 fail("Mermaid: %s" % mermaid_error(ran.stderr or ran.stdout))
 
             # Some diagram types draw a 'Syntax error' picture and exit 0. One with
-            # that picture's size is checked as SVG, which says so in words.
+            # that picture's size is checked as SVG, which says so in words. A
+            # check that cannot run keeps the picture: Mermaid's error picture
+            # says what it is.
             if looks_like_error(out_path):
                 svg = os.path.join(work, "diagram.svg")
                 run_mmdc(tool, browser, source_path, svg, arguments)
 
-                with open(svg, errors="replace") as handle:
+                with contextlib.suppress(OSError), open(svg, errors="replace") as handle:
                     if "Syntax error in text" in handle.read():
                         fail("Mermaid: syntax error in this %s diagram" % kind)
 
@@ -1363,6 +1367,51 @@ def command_mermaid(arguments):
 
     described["kind"] = kind
     print(json.dumps(described))
+
+
+OPEN_WAIT_SECONDS = 5  # an opener that is still running then has started the viewer
+
+
+def command_open(arguments):
+    """Open a stored image in the system's own viewer, for a click on its preview.
+
+    The mod only asks for files it stored. This checks that again: a regular
+    file in the cache, not a link out of it, with an image's extension, so that
+    the system never runs a file that only looks like an image.
+    """
+    cache = os.path.realpath(cache_dir())
+    path = os.path.abspath(arguments.path)
+
+    try:
+        info = os.lstat(path)
+    except OSError as problem:
+        fail("cannot open %s: %s" % (path, problem.strerror))
+
+    if os.path.commonpath([cache, os.path.realpath(path)]) != cache or not stat.S_ISREG(info.st_mode):
+        fail("%s is not in the cache, or not a file" % path)
+
+    if os.path.splitext(path)[1].lower() not in set(EXTENSIONS.values()):
+        fail("%s is not an image" % path)
+
+    # `open` on macOS. Elsewhere `open` can be another program (openvt on Debian).
+    opener = shutil.which("open" if sys.platform == "darwin" else "xdg-open")
+
+    if opener is None:
+        fail("no program to open files with (open or xdg-open)")
+
+    process = subprocess.Popen(
+        [opener, path], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True
+    )
+
+    try:
+        _, stderr = process.communicate(timeout=OPEN_WAIT_SECONDS)
+    except subprocess.TimeoutExpired:
+        stderr = b""  # some openers wait for the viewer: it is open
+
+    if process.returncode not in (None, 0):
+        fail("%s could not open it: %s" % (os.path.basename(opener), stderr.decode(errors="replace").strip()[:200]))
+
+    print(json.dumps({"ok": True}))
 
 
 def command_mermaid_check(arguments):
@@ -1403,6 +1452,10 @@ def main():
     mermaid.set_defaults(run=command_mermaid)
 
     commands.add_parser("mermaid-check").set_defaults(run=command_mermaid_check)
+
+    opened = commands.add_parser("open", help="open a stored image in the system's viewer")
+    opened.add_argument("path")
+    opened.set_defaults(run=command_open)
 
     png = commands.add_parser("png")
     png.add_argument("path")

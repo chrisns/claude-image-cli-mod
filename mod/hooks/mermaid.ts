@@ -71,6 +71,28 @@ export function splitMermaid(markdown: string): Segment[] {
   return segments
 }
 
+/**
+ * The same segments with at most `most` diagrams: the ones after that are text
+ * again, their fenced source as the reply wrote it, joined to the text around them.
+ */
+export function limitDiagrams(segments: Segment[], most: number): Segment[] {
+  const limited: Segment[] = []
+  let diagrams = 0
+
+  for (const segment of segments) {
+    const kept: Segment = segment.kind === 'mermaid' && diagrams++ >= most ? { kind: 'text', text: segment.fence } : segment
+    const last = limited[limited.length - 1]
+
+    if (kept.kind === 'text' && last?.kind === 'text') {
+      limited[limited.length - 1] = { kind: 'text', text: `${last.text}\n${kept.text}` }
+    } else {
+      limited.push(kept)
+    }
+  }
+
+  return limited
+}
+
 /** The diagram's type: the first word after any front matter and %% comments. */
 export function mermaidKind(source: string): string {
   const lines = source.split('\n')

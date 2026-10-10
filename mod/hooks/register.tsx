@@ -1,7 +1,7 @@
 import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
 import { DEFAULT_CELL, fit, type Cell } from './layout.ts'
-import { MERMAID_GUIDE, mermaidKind, splitMermaid } from './mermaid.ts'
+import { limitDiagrams, MERMAID_GUIDE, mermaidKind, splitMermaid } from './mermaid.ts'
 import { stripBlocks } from './model.ts'
 import { baseName, extract, hasImageSequence, parseArguments, type InlineHead } from './osc1337.ts'
 import {
@@ -44,6 +44,9 @@ const MAX_IMAGES = 16
 const PARALLEL = 4
 // A draw that took longer than this is drawn once more when it is ready.
 const SLOW_DRAW_MS = 800
+// render.py gives mmdc 90 seconds, and as long again for the SVG it reads
+// when the picture looks like Mermaid's error picture.
+const MERMAID_TIMEOUT_MS = 200000
 
 // What the helper decoded, by image. The engine keeps a drawing per input, but
 // a resize or a reload draws again, so the work is kept here, bounded.
@@ -95,6 +98,16 @@ const diagramKey = (theme: string, source: string) => `mermaid:${theme}:${imageK
 // background while its reply shows a short line, then drawn: a render hook that
 // waits seconds for a browser leaves its reply unpainted.
 const readyDiagrams = new Lru<string, true>(200)
+// Why a diagram would not draw. The same source fails the same way, and each
+// try starts a browser: it is tried once, and every redraw shows this reason.
+const diagramErrors = new Lru<string, string>(200)
+
+// The rows whose slow draw asked to be drawn again, by what they draw. One more
+// draw each: a draw that is slow every time (a helper that fails slowly) would
+// otherwise ask again at every draw, for ever.
+const redrawn = new Lru<string, true>(500)
+
+const reasonOf = (problem: unknown) => (problem instanceof Error ? problem.message : String(problem))
 
 /** Remember a promise under a key, and forget it if it fails, so the next draw tries again. */
 function remember<V>(cache: Lru<string, Promise<V>>, key: string, start: () => Promise<V>): Promise<V> {
@@ -107,6 +120,39 @@ function remember<V>(cache: Lru<string, Promise<V>>, key: string, start: () => P
   }
 
   return found
+}
+
+/** A diagram's picture, rendered once; a diagram that failed fails again at once, with its reason. */
+function drawDiagram($: EngineInterface, options: Options, source: string): Promise<Inspected> {
+  const key = diagramKey(options.mermaidTheme, source)
+  const failed = diagramErrors.get(key)
+
+  if (failed !== undefined) {
+    return Promise.reject(new Error(failed))
+  }
+
+  return remember(inspected, key, async () => {
+    try {
+      const ran = await $.process.run([options.python, options.helper, 'mermaid', '--theme', options.mermaidTheme], {
+        stdin: source,
+        timeoutMs: MERMAID_TIMEOUT_MS,
+      })
+
+      return parseReply<Inspected>(ran.stdout, ran.stderr, ran.exitCode)
+    } catch (problem) {
+      diagramErrors.set(key, reasonOf(problem))
+      throw problem
+    }
+  })
+}
+
+/** The images of a saved output, read once until a picture of it fails. */
+function scanSaved($: EngineInterface, options: Options, saved: string): Promise<Scanned> {
+  return remember(scans, saved, async () => {
+    const ran = await $.process.run([options.python, options.helper, 'scan', saved], { timeoutMs: 60000 })
+
+    return parseReply<Scanned>(ran.stdout, ran.stderr, ran.exitCode)
+  })
 }
 
 /**
@@ -138,10 +184,11 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
       const kind = mermaidKind(diagram)
 
       found.push({
+        key,
         head: { name: '', width: { unit: 'auto' }, height: { unit: 'auto' }, isAspectPreserved: true, isInline: true },
         title: `${kind} diagram`,
         fallback: `\`\`\`mermaid\n${diagram}\n\`\`\``,
-        inspect: () => remember(inspected, key, () => run<Inspected>(['mermaid', '--theme', options.mermaidTheme], diagram)),
+        inspect: () => drawDiagram($, options, diagram),
         forget: () => inspected.delete(key),
       })
       continue
@@ -161,6 +208,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
       }
 
       found.push({
+        key,
         head,
         inspect: () => remember(inspected, key, () => run<Inspected>(['inspect', '--file', path, '--name', baseName(path)])),
         forget: () => inspected.delete(key),
@@ -173,15 +221,30 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     if (saved !== undefined) {
       // The tool cut the text short: the whole output is in a file.
       try {
-        const scanned = await remember(scans, saved, () => run<Scanned>(['scan', saved]))
+        const scanned = await scanSaved($, options, saved)
 
-        for (const { args, ...stored } of scanned.images) {
+        scanned.images.forEach(({ args }, index) => {
           const head = parseArguments(args)
 
           if (head.isInline) {
-            found.push({ head, inspect: async () => stored, forget: () => scans.delete(saved) })
+            found.push({
+              key: `scan:${saved}:${index}`,
+              head,
+              // Read through the scan each time: after a forget (its stored copy
+              // was pruned), the retry scans the file again.
+              inspect: async () => {
+                const image = (await scanSaved($, options, saved)).images[index]
+
+                if (image === undefined) {
+                  throw new Error('the saved output changed')
+                }
+
+                return image
+              },
+              forget: () => scans.delete(saved),
+            })
           }
-        }
+        })
 
         continue
       } catch {
@@ -198,6 +261,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
       const name = image.name === '' ? [] : ['--name', image.name]
 
       found.push({
+        key,
         head: image,
         inspect: () => remember(inspected, key, () => run<Inspected>(['inspect', ...name], image.base64)),
         forget: () => inspected.delete(key),
@@ -331,7 +395,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
         return picture(pic, index, true)
       }
 
-      const reason = problem instanceof Error ? problem.message : String(problem)
+      const reason = reasonOf(problem)
 
       if (pic.fallback !== undefined) {
         // A diagram that will not draw: its source, as the reply wrote it, and why.
@@ -371,7 +435,12 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
   // A slow first draw (a diagram rendered, an image decoded) is laid out but not
   // always painted. Draw once more when it is ready: from the cache, so fast.
-  if ((await $.clock.now()) - startedAt > SLOW_DRAW_MS) {
+  // Once for what these pictures are, because a failure is not cached and the
+  // draw that it asks for is as slow again.
+  const drawing = `${e.surface}\u0000${shown.map(pic => pic.key).join('\u0000')}`
+
+  if ((await $.clock.now()) - startedAt > SLOW_DRAW_MS && redrawn.get(drawing) === undefined) {
+    redrawn.set(drawing, true)
     $.clock.after(100, () => $.ui.invalidate('ui.render'))
   }
 
@@ -409,7 +478,8 @@ export const register: Register = (on, settings) => {
       return next(e)
     }
 
-    const segments = splitMermaid(e.props.text)
+    // Past the most pictures a row draws, a diagram stays as its source.
+    const segments = limitDiagrams(splitMermaid(e.props.text), MAX_IMAGES)
     const sources = segments.flatMap(segment => (segment.kind === 'mermaid' ? [segment.source] : []))
 
     if (sources.length === 0) {
@@ -420,39 +490,34 @@ export const register: Register = (on, settings) => {
     const pending = sources.filter(source => readyDiagrams.get(diagramKey(options.mermaidTheme, source)) === undefined)
 
     // Render the new diagrams in the background, then draw the reply again.
-    for (const source of pending) {
+    for (const source of new Set(pending)) {
       const key = diagramKey(options.mermaidTheme, source)
 
-      void remember(inspected, key, async () => {
-        const ran = await $.process.run([options.python, options.helper, 'mermaid', '--theme', options.mermaidTheme], {
-          stdin: source,
-          timeoutMs: 120000,
+      // A failure is drawn too: the source and the reason, by previews.
+      void drawDiagram($, options, source)
+        .catch(() => undefined)
+        .finally(() => {
+          readyDiagrams.set(key, true)
+          $.ui.invalidate('ui.render')
         })
-
-        return parseReply<Inspected>(ran.stdout, ran.stderr, ran.exitCode)
-      })
-        .then(
-          () => readyDiagrams.set(key, true),
-          // A failure is drawn too: the source and the reason, by previews.
-          () => readyDiagrams.set(key, true),
-        )
-        .finally(() => $.ui.invalidate('ui.render'))
     }
 
-    // The ready diagrams in one call: one click layer key each. A reply's row
-    // paints no Raster, so the cells are drawn as coloured text.
+    // The ready diagrams in one call: one click layer key each, so a diagram
+    // that the reply holds twice is drawn twice. A reply's row paints no
+    // Raster, so the cells are drawn as coloured text.
     const ready = sources.filter(source => !pending.includes(source))
     const drawnReady = (await previews($, e, settings, ready.map(source => ({ mermaid: source })), true)).nodes
-    const nodes = sources.map(source => {
+    let nextReady = 0
+    const nodes = sources.map((source, index) => {
       if (pending.includes(source)) {
         return (
-          <Box key={`inline-pending-${diagramKey('', source)}`} paddingLeft={2}>
+          <Box key={`inline-pending-${index}`} paddingLeft={2}>
             <Text dimColor>{`\u22ef drawing a ${mermaidKind(source)} diagram`}</Text>
           </Box>
         )
       }
 
-      return drawnReady[ready.indexOf(source)]
+      return drawnReady[nextReady++]
     })
     const [first, ...rest] = segments
     // The engine draws the first text (and the reply's bullet); the rest follows.
@@ -585,15 +650,18 @@ export const register: Register = (on, settings) => {
     const open = clickTargets.get(clickKey(e.requestId, e.element))
 
     if (asked === true && open !== undefined) {
-      const opened = await $.process.run(['open', open]).catch(() => undefined)
+      // The helper picks the opener for the platform (on Linux `open` can be
+      // openvt), and opens only an image in the cache.
+      const options = readOptions(settings, $.plugin.root)
 
-      if (opened === undefined || opened.exitCode !== 0) {
-        await $.process.run(['xdg-open', open]).catch(() => undefined)
-      }
+      await $.process
+        .run([options.python, options.helper, 'open', open], { timeoutMs: 15000 })
+        .then(ran => parseReply<{ ok: true }>(ran.stdout, ran.stderr, ran.exitCode))
+        .catch(problem => $.ui.log(`inline-images: cannot open ${open}: ${reasonOf(problem)}`, { to: 'debug' }))
     }
 
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   // A call drawn on its own row: the pictures go under its result. One hook for
   // every kind of source, so the click layers of one row never share a key.
@@ -638,12 +706,7 @@ export const register: Register = (on, settings) => {
     let shown: number | undefined
 
     if (saved !== undefined && text !== undefined && hasImageSequence(text)) {
-      const options = readOptions(settings, $.plugin.root)
-      const scanned = await remember(scans, saved, async () => {
-        const ran = await $.process.run([options.python, options.helper, 'scan', saved], { timeoutMs: 60000 })
-
-        return parseReply<Scanned>(ran.stdout, ran.stderr, ran.exitCode)
-      }).catch(() => undefined)
+      const scanned = await scanSaved($, readOptions(settings, $.plugin.root), saved).catch(() => undefined)
 
       shown = scanned?.images.filter(image => parseArguments(image.args).isInline).length
     }

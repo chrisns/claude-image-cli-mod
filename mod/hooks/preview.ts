@@ -26,6 +26,8 @@ export type Inspected = {
 
 /** An image that is ready to size and draw: how the sender asked for it, and where it is stored. */
 export type Pic = {
+  /** What the picture is: the same image, file or diagram has the same key. */
+  key: string
   head: InlineHead
   inspect: () => Promise<Inspected>
   /** Drop what `inspect` remembers, so the next draw reads the image again. */
@@ -291,7 +293,7 @@ export function cellRuns(cells: string, columns: number, rows: number): Run[][] 
         break
       }
 
-      const glyph = String.fromCharCode(view.getUint32(at, true))
+      const glyph = String.fromCodePoint(view.getUint32(at, true))
       const color = hex(view.getUint32(at + 4, true))
       const backgroundColor = hex(view.getUint32(at + 8, true))
       const last = runs[runs.length - 1]

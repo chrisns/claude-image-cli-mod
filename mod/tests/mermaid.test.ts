@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { MERMAID_GUIDE, mermaidKind, splitMermaid } from '../hooks/mermaid.ts'
+import { limitDiagrams, MERMAID_GUIDE, mermaidKind, splitMermaid } from '../hooks/mermaid.ts'
 
 describe('splitMermaid', () => {
   test('text with no diagram is one text segment', () => {
@@ -41,6 +41,24 @@ describe('splitMermaid', () => {
     const reply = '```bash\nnpm install -g @mermaid-js/mermaid-cli\n```'
 
     expect(splitMermaid(reply)).toEqual([{ kind: 'text', text: reply }])
+  })
+})
+
+describe('limitDiagrams', () => {
+  test('diagrams past the limit are their fenced source again, joined to the text around them', () => {
+    const block = (name: string) => `\`\`\`mermaid\nflowchart LR\n  ${name}\n\`\`\``
+    const reply = [block('A'), 'between', block('B'), 'after'].join('\n')
+
+    expect(limitDiagrams(splitMermaid(reply), 1)).toEqual([
+      { kind: 'mermaid', source: 'flowchart LR\n  A', fence: block('A') },
+      { kind: 'text', text: `between\n${block('B')}\nafter` },
+    ])
+  })
+
+  test('under the limit, nothing changes', () => {
+    const segments = splitMermaid('a\n```mermaid\npie\n```\nb')
+
+    expect(limitDiagrams(segments, 16)).toEqual(segments)
   })
 })
 

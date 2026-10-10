@@ -72,7 +72,7 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 - **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery. [See it](#images-that-claude-sends).
 - **Diagrams.** Claude can draw Mermaid diagrams: flowcharts, sequence diagrams, ER diagrams, Gantt charts, mind maps, Wardley maps and more. Each one appears as a picture in Claude's reply. [See them](#diagrams).
 - **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
-- **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, shown to the user]`, not 190,000 characters of base64.
+- **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, data left out; the user sees a preview if their terminal can draw it]`, not 190,000 characters of base64.
 - **Large images.** Claude Code cuts tool output at 30,000 characters. The mod reads the whole output from the file where Claude Code saves it.
 - **The right shape.** The mod measures your terminal's cell size and keeps the picture's aspect ratio.
 - **The whole protocol.** `File=`, chunked `MultipartFile`, the tmux passthrough wrapper, the `BEL` and `ST` terminators, `width`, `height` and `preserveAspectRatio`. A download (`inline=0`) is not shown, and its note says so.
@@ -92,6 +92,7 @@ Every Mermaid diagram type works. These four came from four one-line requests:
 - A new diagram shows a short "drawing a … diagram" line for a second or two, then the picture.
 - A diagram with an error shows its source and the reason.
 - Click a diagram to open it full size.
+- One reply draws up to 16 diagrams. A diagram after the 16th stays as its source text.
 
 Diagrams need [mermaid-cli](https://github.com/mermaid-js/mermaid-cli) and a Chrome-family browser (Chrome, Chromium, Edge or Brave):
 
@@ -184,7 +185,7 @@ Claude Code repaints only the cells that it thinks have changed. An image that i
 - `not a supported image format`: the mod draws only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO.
 - `the image is too large`: the image has more than 40 million pixels, which is too many to decode safely.
 
-**A diagram stays as text, or says `not drawn`.** Check that `mmdc --version` works in the shell that starts Claude Code. The text after `not drawn:` is Mermaid's own error message. To have Claude fix the diagram, paste that message back to it.
+**A diagram stays as text, or says `not drawn`.** Check that `mmdc --version` works in the shell that starts Claude Code. The text after `not drawn:` is Mermaid's own error message. To have Claude fix the diagram, paste that message back to it. The mod tries each diagram one time in a session. A changed diagram is a new diagram, so the mod tries it again. If you fix the cause outside the diagram, for example you install `mmdc`, start a new session.
 
 **iTerm2 shows blocks, not real pixels.**
 
@@ -221,7 +222,7 @@ Any program, file or web page can control the output that the mod reads. So:
 - It decodes only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO. It checks the first bytes of the data before any decoder runs. PostScript, PDF and SVG never reach Ghostscript or ImageMagick.
 - It refuses an image of more than 40 million pixels before it decodes it.
 - It keeps its cache in a folder that only your user can read, and it writes each file atomically.
-- A click opens the cached copy of an image, with the extension of the format that was decoded. It never opens a path that the tool output names.
+- A click opens the cached copy of an image, with the extension of the format that was decoded. It never opens a path that the tool output names. Before it opens a file, the helper checks that the file is an image in the cache, and not a link to another place.
 - It removes control and format characters from file names before it shows them.
 - It scans untrusted text in linear time.
 - The iTerm2 overlay writes only base64 image data and cursor moves to the terminal.

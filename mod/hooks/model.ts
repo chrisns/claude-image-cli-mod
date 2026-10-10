@@ -5,11 +5,16 @@ type Block = { type: string; [field: string]: unknown }
 /** Cut every inline image out of one string; the same string comes back when there is none. */
 export function strip(text: string): string {
   // A download (inline=0) is never drawn: its note says so, and is left as it is.
-  return extract(text, image => (image.isInline ? describe(image).replace(/]$/, ', shown to the user]') : describe(image)), SHOWN_CUT).text
+  return extract(text, image => (image.isInline ? describe(image).replace(/]$/, `, data left out; ${PREVIEW}]`) : describe(image)), SHOWN_CUT).text
 }
 
-/** The note for image data that a size limit cut off: the mod read it whole and showed it. */
-export const SHOWN_CUT = '[inline image data left out here; the user saw the image]'
+// What the model is told the user sees. The note is written before any draw, and
+// a draw can fail (no decoder, a format the helper refuses) or never happen (a
+// surface the mod does not draw on): it claims no more than the mod can promise.
+const PREVIEW = 'the user sees a preview if their terminal can draw it'
+
+/** The note for image data that a size limit cut off: the mod reads it whole from the saved output. */
+export const SHOWN_CUT = `[inline image data left out here; ${PREVIEW}]`
 
 /**
  * Rewrite the content of a tool result so that no image data is in it.

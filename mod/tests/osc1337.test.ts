@@ -138,20 +138,20 @@ describe('stripBlocks', () => {
   test('cuts the data out of a string result', () => {
     const [block] = stripBlocks(result(`hi\n${whole(`name=${NAME};inline=1`)}\n`))
 
-    expect(block?.content).toBe('hi\n[inline image: tiny.png, 70 B, shown to the user]\n')
+    expect(block?.content).toBe('hi\n[inline image: tiny.png, 70 B, data left out; the user sees a preview if their terminal can draw it]\n')
   })
 
   test('cuts the data out of text blocks and keeps other blocks', () => {
     const image = { type: 'image', source: {} }
     const [block] = stripBlocks(result([{ type: 'text', text: whole('inline=1') }, image]))
 
-    expect(block?.content).toEqual([{ type: 'text', text: '[inline image: unnamed, 70 B, shown to the user]' }, image])
+    expect(block?.content).toEqual([{ type: 'text', text: '[inline image: unnamed, 70 B, data left out; the user sees a preview if their terminal can draw it]' }, image])
   })
 
-  test('says the user saw an image whose data a size limit cut off', () => {
+  test('says the data of an image that a size limit cut off is left out', () => {
     const [block] = stripBlocks(result(`${ESC}]1337;File=inline=1:${PNG.slice(0, 20)}`))
 
-    expect(block?.content).toBe('[inline image data left out here; the user saw the image]')
+    expect(block?.content).toBe('[inline image data left out here; the user sees a preview if their terminal can draw it]')
   })
 
   test('returns the same array when there is nothing to cut', () => {

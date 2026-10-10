@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Crop a Claude Code screenshot to the transcript.
 
-Removes the input box, Claude Code's status line and iTerm2's status bar, which
-show things that do not belong in a README (the prompt suggestion, an account
-name, a host name). The cut goes just above the input box: the top one of the
-two long horizontal rules in the lower half of the window.
+Removes the input box, Claude Code's status line, iTerm2's status bar and the
+line just above the input box, which show things that do not belong in a README
+(the prompt suggestion, an account name, a host name, a usage notice). The cut
+goes above the top one of the two long horizontal rules in the lower half of
+the window.
 
     crop-screenshot.py in.png out.png [--width 1400]
 """
@@ -28,6 +29,7 @@ def main():
     parser.add_argument("source")
     parser.add_argument("target")
     parser.add_argument("--width", type=int, default=1400, help="scale down to this width")
+    parser.add_argument("--line", type=int, default=20, help="points above the input box to cut: the spinner and any notice")
     arguments = parser.parse_args()
 
     image = Image.open(arguments.source).convert("RGB")
@@ -53,7 +55,10 @@ def main():
     if len(thin) < 2:
         raise SystemExit("could not find the input box")
 
-    cut = thin[1][-1] - 4  # the upper rule of the input box, with a little room
+    # The upper rule of the input box, less the line above it, where Claude Code
+    # puts the spinner and notices (usage limits) that do not belong in a README.
+    scale = 2 if width >= 1200 else 1  # a Retina capture has two pixels per point
+    cut = thin[1][-1] - 4 - arguments.line * scale
     image = image.crop((0, 0, width, cut))
 
     if image.width > arguments.width:

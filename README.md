@@ -15,6 +15,10 @@ This mod shows each image under the tool call that printed it. It also shows the
 
 The picture on the right is a real iTerm2 image, at full resolution, inside a running Claude Code session.
 
+![A command prints two images: each row shows a block preview first, then the real image](docs/screenshots/gallery.gif)
+
+In iTerm2 each picture comes in as a block preview, then the real image replaces it.
+
 ## Contents
 
 - [Quick start](#quick-start)
@@ -64,7 +68,7 @@ The picture on the right is a real iTerm2 image, at full resolution, inside a ru
 
 - **Previews in the transcript.** Each image appears under the tool call that printed it, with its name, size and format.
 - **Real pixels.** iTerm2, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
-- **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery.
+- **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery. [See it](#images-that-claude-sends).
 - **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
 - **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, shown to the user]`, not 190,000 characters of base64.
 - **Large images.** Claude Code cuts tool output at 30,000 characters. The mod reads the whole output from the file where Claude Code saves it.
@@ -72,7 +76,11 @@ The picture on the right is a real iTerm2 image, at full resolution, inside a ru
 - **The whole protocol.** `File=`, chunked `MultipartFile`, the tmux passthrough wrapper, the `BEL` and `ST` terminators, `width`, `height` and `preserveAspectRatio`. A download (`inline=0`) is not shown, and its note says so.
 - **Transparency** and several images in one command.
 
-![One command that prints a PNG with a transparent background and a gradient](docs/screenshots/gallery.png)
+### Images that Claude sends
+
+Ask Claude to send you an image, and it shows under the delivery:
+
+![Claude delivers earth.jpg with SendUserFile, and the photo appears under the delivery](docs/screenshots/deliver.gif)
 
 ## Terminals
 
@@ -83,9 +91,11 @@ The picture on the right is a real iTerm2 image, at full resolution, inside a ru
 | kitty, Ghostty | Real pixels | Claude Code's own `Image` element, which uses the kitty graphics protocol. |
 | Any other terminal | Coloured blocks | The `cells` renderer. Each cell holds 2 by 2 blocks of colour. |
 
-This is the same photo in Ghostty:
+The same photo in kitty and in Ghostty:
 
-![The photo of the Earth in Ghostty, drawn with real pixels](docs/screenshots/with-mod-ghostty.png)
+| kitty | Ghostty |
+|---|---|
+| ![The photo of the Earth in kitty, drawn with real pixels](docs/screenshots/with-mod-kitty.png) | ![The photo of the Earth in Ghostty, drawn with real pixels](docs/screenshots/with-mod-ghostty.png) |
 
 This is the block preview that other terminals show:
 
@@ -201,16 +211,18 @@ To type-check, start one session with the mod, so that Claude Code writes the ty
 
 To see each draw of the iTerm2 overlay, start `claude` with `INLINE_IMAGES_DEBUG=/tmp/overlay.log`.
 
-### Screenshots
+### Screenshots and GIFs
 
-The scripts in [`scripts/`](scripts) drive iTerm2 and Ghostty on macOS. They start a session with Haiku, send a prompt and save the window. Your terminal needs the Screen Recording permission.
+The scripts in [`scripts/`](scripts) drive iTerm2, Ghostty and kitty on macOS. They start a session with Haiku, send a prompt and save the window. Your terminal needs the Screen Recording permission.
 
 ```
 scripts/screenshot.sh docs/screenshots/raw-with.png with 'Use the Bash tool to run ~/.iterm2/imgcat docs/fixtures/earth.jpg. Do not read the file yourself. Reply with the single word: done.'
 python3 scripts/crop-screenshot.py docs/screenshots/raw-with.png docs/screenshots/with-mod.png
+scripts/record.sh docs/screenshots/deliver.gif 'Send me the file docs/fixtures/earth.jpg with the SendUserFile tool. Do not read it. Then reply in one short sentence.'
+scripts/screenshot-app.sh kitty docs/screenshots/raw-kitty.png 'Use the Bash tool to run ~/.iterm2/imgcat -H 16 docs/fixtures/earth.jpg. Reply with the single word: done.'
 ```
 
-`crop-screenshot.py` removes the input box and the status lines.
+`crop-screenshot.py` and `make-gif.py` remove the input box, the status lines, the line above the input box and the start-up banner. `record.sh` needs ffmpeg.
 
 ## Credits
 

@@ -28,6 +28,7 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
+- [Security](#security)
 - [Uninstall](#uninstall)
 - [Develop](#develop)
 
@@ -177,9 +178,23 @@ To see why the overlay is off, set the `renderer` option to `iterm`. A message t
 
 **Does it send anything over the network?** No.
 
-**Is it safe to show an image from an unknown source?** The mod treats all tool output as untrusted. Read [SECURITY.md](SECURITY.md) for what it does.
+**Is it safe to show an image from an unknown source?** The mod treats all tool output as untrusted. See [Security](#security).
 
 **Why braille glyphs in the iTerm2 marker?** No prompt, reply or diff uses them, and each glyph is one cell wide.
+
+## Security
+
+Any program, file or web page can control the output that the mod reads. So:
+
+- It decodes only PNG, JPEG, GIF, WebP, BMP, TIFF and ICO. It checks the first bytes of the data before any decoder runs. PostScript, PDF and SVG never reach Ghostscript or ImageMagick.
+- It refuses an image of more than 40 million pixels before it decodes it.
+- It keeps its cache in a folder that only your user can read, and it writes each file atomically.
+- A click opens the cached copy of an image, with the extension of the format that was decoded. It never opens a path that the tool output names.
+- It removes control and format characters from file names before it shows them.
+- It scans untrusted text in linear time.
+- The iTerm2 overlay writes only base64 image data and cursor moves to the terminal.
+
+To report a problem, read [SECURITY.md](SECURITY.md).
 
 ## Uninstall
 

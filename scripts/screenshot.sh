@@ -36,31 +36,56 @@ OSA
 press() { osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text (ASCII character 13) newline no"; }
 screen() { osascript -e "tell application \"iTerm\" to tell current session of window id $id to get contents"; }
 
-# Wait for the prompt. A new folder asks for trust first: accept it for this repository.
+# A dialog (a permission prompt, a usage guard) waits for you, not for this
+# script: stop, and touch nothing in the session.
+dialog() { screen | grep -v "^ *$" | tail -3 | grep -q "Enter to select"; }
+give_up() {
+  osascript -e "tell application \"iTerm\" to close window id $id" || true
+  echo "a dialog waits in the Claude Code session: answer it in a session of your own, then run this again" >&2
+  exit 3
+}
+
+# Whether the prompt is still in the input box (its last line starting with ❯).
+unsent() { screen | grep "^❯" | tail -1 | sed 's/^❯[[:space:] ]*//' | grep -q '[^[:space:] ]'; }
+
+# Send the prompt. The paste can take the first Return; another goes only
+# while the prompt is still unsent, never into a dialog that opened meanwhile.
+submit() {
+  osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text \"$1\""
+  sleep 1.5
+  press
+
+  for _ in 1 2 3; do
+    sleep 1.5
+    dialog && give_up
+    unsent || return 0
+    press
+  done
+}
+
+# Wait for the prompt. A folder Claude Code has not seen asks for trust first:
+# that is your decision, so stop and let you answer it once.
 for _ in {1..40}; do
   sleep 1
-  if screen | grep -q "trust this folder"; then
-    osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text (ASCII character 27) & \"[B\" newline no"
-    sleep 0.5; press
-  fi
+  screen | grep -q "trust this folder" && give_up
   screen | grep -q "Claude Code v" && break
 done
 sleep 4
 
-osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text \"$prompt\""
-sleep 2; press; sleep 3; press
+submit "$prompt"
 
 # Wait until the turn is over: the status line no longer says it is working.
 sleep 12
 for _ in {1..60}; do
-  screen | grep -Eq "(Baked|Brewed|Churned|Cogitated|Cooked|Crunched|Worked|Sautéed|Saut.ed) for" && break
+  screen | grep -Eq " for [0-9]+[sm].* · done " && break
+  dialog && give_up
   sleep 2
 done
 sleep 3
 
 screencapture -x -o -l "$id" "$out"
 
-osascript -e "tell application \"iTerm\" to tell current session of window id $id to write text \"/exit\""
-sleep 1; press; sleep 2
+# Close the window: never type into a session that may show a dialog (an
+# answer typed there would be the script's, not yours).
 osascript -e "tell application \"iTerm\" to close window id $id" || true
 echo "wrote $out"

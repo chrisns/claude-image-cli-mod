@@ -17,7 +17,7 @@ import {
   parseReply,
   readOptions,
   savedPath,
-  wantsOverlay,
+  overlayCommand,
   withoutImages,
   withText,
   type Inspected,
@@ -61,7 +61,7 @@ const cellSizes = new Lru<number, Cell>(8)
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
 // The $.store key set once the overlay has been live on this machine, per terminal:
 // one machine may run several.
-const OVERLAY_WORKED = 'overlayWorked:iTerm2'
+const overlayWorked = (terminal: string) => `overlayWorked:${terminal}`
 
 // Whether this machine can draw Mermaid diagrams (mmdc is installed): Claude
 // is told it can draw them only then.
@@ -292,7 +292,12 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
   // Markers whenever the overlay is wanted here and has not failed: a row drawn while
   // it starts (as after a reload) is not always drawn again once it is ready.
   const usesOverlay =
-    overlay !== 'failed' && (await $.env.get('ITERM_SESSION_ID')) !== undefined && wantsOverlay(options.renderer, program)
+    overlay !== 'failed' &&
+    overlayCommand(options, {
+      program,
+      itermSession: await $.env.get('ITERM_SESSION_ID'),
+      weztermPane: await $.env.get('WEZTERM_PANE'),
+    }) !== undefined
   const isPixelTerminal = drawsPixels(program, await $.env.get('TERM'), await $.env.get('KITTY_WINDOW_ID'))
   const isPixels = options.renderer === 'image' || (options.renderer === 'auto' && isPixelTerminal)
   const { Box, Text, Raster, Image, Client, Link, Markdown } = $.ui.resolve(e)
@@ -577,9 +582,13 @@ export const register: Register = (on, settings) => {
       }
     }
 
-    const sessionId = await $.env.get('ITERM_SESSION_ID')
+    const command = overlayCommand(options, {
+      program: await $.env.get('TERM_PROGRAM'),
+      itermSession: await $.env.get('ITERM_SESSION_ID'),
+      weztermPane: await $.env.get('WEZTERM_PANE'),
+    })
 
-    if (overlay !== 'off' || sessionId === undefined || !wantsOverlay(options.renderer, await $.env.get('TERM_PROGRAM'))) {
+    if (overlay !== 'off' || command === undefined) {
       return started
     }
 
@@ -592,7 +601,7 @@ export const register: Register = (on, settings) => {
       let lastError = ''
 
       try {
-        for await (const piece of $.process.spawn({ argv: [options.python, options.overlay, '--session', sessionId] })) {
+        for await (const piece of $.process.spawn({ argv: [options.python, ...command.argv] })) {
           if (piece.stream === 'stderr') {
             lastError = piece.text.trim().split('\n').pop() ?? lastError
             continue
@@ -608,7 +617,7 @@ export const register: Register = (on, settings) => {
               $.ui.invalidate('ui.render')
               // Remembered across sessions: once real pixels have worked here, losing
               // them is a breakage to report, not a setup never done.
-              void $.store.set(OVERLAY_WORKED, true).catch(() => undefined)
+              void $.store.set(overlayWorked(command.terminal), true).catch(() => undefined)
             } else if (message.ok === false && message.error !== undefined) {
               reason = message.error
             }
@@ -626,18 +635,18 @@ export const register: Register = (on, settings) => {
       const why = reason || lastError || 'the overlay stopped'
       // Real pixels worked in an earlier session and fail at the start of this one:
       // something changed (a Python upgrade that left the iterm2 module behind, the
-      // Python API turned off).
-      const workedBefore = !wasLive && (await $.store.get(OVERLAY_WORKED).catch(() => undefined)) === true
+      // Python API turned off, the WezTerm line taken out of the config).
+      const workedBefore = !wasLive && (await $.store.get(overlayWorked(command.terminal)).catch(() => undefined)) === true
       const message = wasLive
-        ? `inline-images: the iTerm2 overlay stopped: ${why}`
+        ? `inline-images: the ${command.terminal} overlay stopped: ${why}`
         : workedBefore
-          ? `inline-images: real pixels in iTerm2 worked before but not in this session, so block previews only: ${why}. Fix it, then start a new session.`
-          : `inline-images: block previews only, no real pixels in iTerm2: ${why}`
+          ? `inline-images: real pixels in ${command.terminal} worked before but not in this session, so block previews only: ${why}. Fix it, then start a new session.`
+          : `inline-images: block previews only, no real pixels in ${command.terminal}: ${why}`
 
       // Asked for by name, the person hears why it is off. In auto mode a missing
-      // setup (no iterm2 module, no Python API) is the normal case: debug log only,
-      // unless it worked here before.
-      if (options.renderer === 'iterm' || wasLive || workedBefore) {
+      // setup (no iterm2 module, no Python API, no WezTerm line) is the normal case:
+      // debug log only, unless it worked here before.
+      if (options.renderer === 'iterm' || options.renderer === 'wezterm' || wasLive || workedBefore) {
         $.ui.toast(message)
       } else {
         $.ui.log(message, { to: 'debug' })

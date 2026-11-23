@@ -82,6 +82,33 @@ class Inbox(unittest.TestCase):
             self.assertEqual(names, ["7-0000000000000002.osc", "7-0000000000000010.osc"])
             self.assertEqual(open(os.path.join(path, names[1]), "rb").read(), b"ten")
 
+    def test_waits_while_a_posted_image_is_in_the_inbox(self):
+        with tempfile.TemporaryDirectory() as path:
+            pane = wezterm_overlay.Pane("3", inbox=path)
+            first = wezterm_overlay.post(path, "3", 1, b"x")
+            pane.pending.append((first, time.monotonic()))
+            self.assertTrue(pane.waiting())
+            os.remove(first)  # WezTerm picked it up
+            self.assertFalse(pane.waiting())
+
+
+class Screen(unittest.TestCase):
+    def test_reads_the_screen_that_the_wezterm_side_wrote(self):
+        with tempfile.TemporaryDirectory() as path:
+            pane = wezterm_overlay.Pane("4", inbox=path)
+            self.assertFalse(pane.read_screen())
+
+            pane.watch(now=1000)
+            self.assertEqual(open(os.path.join(path, "4.watch")).read(), "1000\n")
+
+            wezterm_overlay.post_text(os.path.join(path, "4.screen"), "3 20 7\nab\n\u28ff\n")
+            self.assertTrue(pane.read_screen())
+            self.assertEqual((pane.grid_size.width, pane.grid_size.height, pane.sequence), (20, 3, 7))
+
+            contents = wezterm_overlay.Contents(pane.text, pane.grid_size.height, [])
+            self.assertEqual(contents.number_of_lines, 3)
+            self.assertEqual(contents.line(1).string, "\u28ff")
+
 
 if __name__ == "__main__":
     unittest.main()

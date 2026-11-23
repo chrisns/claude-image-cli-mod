@@ -187,16 +187,17 @@ WezTerm does not draw kitty Unicode placeholders either, so the mod uses the sam
    require('inline_images').apply(config)
    ```
 
-2. [`mod/bin/wezterm_overlay.py`](mod/bin/wezterm_overlay.py) starts with the session. It reads the screen with `wezterm cli get-text`, and finds the boxes by their markers.
+2. [`mod/bin/wezterm_overlay.py`](mod/bin/wezterm_overlay.py) starts with the session. The Lua file writes the pane's screen text to a file for it (`pane:get_lines_as_text`), and the overlay finds the boxes there by their markers. It does not use `wezterm cli get-text`: that call sends every image in the pane with the text, and polling it stalls WezTerm.
 3. It puts each image, as one escape sequence, in `~/.local/state/inline-images/wezterm` (a folder only you can open). The Lua file hands it to `pane:inject_output`.
 
 <details>
 <summary>Why not write to the pane's tty?</summary>
 
 - Bytes that another process writes to the tty mix with Claude Code's own output. A large image then breaks in the middle, and its base64 shows as text. `inject_output` runs inside WezTerm, between whole actions of Claude Code's output.
-- `inject_output` does not repaint the window, so the Lua file changes the tab bar's right status after each image, and WezTerm repaints.
+- `inject_output` does not repaint the window, so the Lua file changes the window's right status to one or two spaces after each image, and WezTerm repaints. A right status of your own is overwritten until your next `update-status`.
+- The Lua file works on WezTerm's `update-status` event, so images show within one `status_update_interval`. It sets 250 ms unless your config sets a value first. Timers do not work here: WezTerm loads the config again often, and a timer started then fires late or never.
 - WezTerm draws only a single `File=` sequence; it ignores `MultipartFile`.
-- `get-text` cannot tell an image cell from a text cell: WezTerm draws an image over the text in its cells. So the overlay erases the cells before it draws the image. A blank cell where it drew is an image cell; a glyph there means Claude Code painted the cell again.
+- The screen text cannot tell an image cell from a text cell: WezTerm draws an image over the text in its cells. So the overlay erases the cells before it draws the image. A blank cell where it drew is an image cell; a glyph there means Claude Code painted the cell again.
 
 </details>
 

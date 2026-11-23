@@ -5,8 +5,10 @@ The same daemon as `iterm_overlay.py`, with WezTerm in place of the iTerm2
 Python API. The `Watcher` there decides what to draw and when; this file gives
 it a WezTerm pane to read and write:
 
-- It reads the screen with `wezterm cli get-text`. WezTerm has no screen
-  stream, so it reads a few times a second, faster while boxes are on it.
+- It reads the screen from a file that `mod/wezterm/inline_images.lua` writes
+  from inside WezTerm (`pane:get_lines_as_text`) while this daemon asks for it.
+  Not `wezterm cli get-text`: that sends every image in the pane with the text,
+  and polling it stalled WezTerm.
 - It cannot write the image to the pane's tty: those bytes mix with Claude
   Code's own output, and a large image then shows as base64 text. It drops the
   image, as one escape sequence, in a private folder (the inbox), and
@@ -15,7 +17,7 @@ it a WezTerm pane to read and write:
   Without that file in the config the overlay does not run. WezTerm draws the
   iTerm2 protocol, but only a single `File=` sequence: it ignores
   `MultipartFile`.
-- `get-text` does not say which cells show an image: WezTerm draws an image
+- The screen text does not say which cells show an image: WezTerm draws an image
   over the text that is in its cells. So before the image goes down, the cells
   under it are erased. A blank cell where this daemon drew is an image cell;
   when Claude Code paints the cell again it shows its glyph, and the image in
@@ -33,7 +35,6 @@ import asyncio
 import base64
 import json
 import os
-import shutil
 import sys
 import tempfile
 import time
@@ -46,34 +47,16 @@ if HERE not in sys.path:
 
 from iterm_overlay import BRAILLE, LOOK_SECONDS, Overlays, Watcher, debug, emit  # noqa: E402
 
-FAST_SECONDS = 0.15  # between reads while boxes or images are on the screen
-SLOW_SECONDS = 0.5  # between reads otherwise
-HEARTBEAT_SECONDS = 1.0  # look anyway, though the text has not changed
-GEOMETRY_SECONDS = 2.0  # read the pane's size again after this long
+HEARTBEAT_SECONDS = 1.0  # look anyway, though the screen has not changed, while boxes show
 MAX_DRAWN = 256  # rectangles remembered as drawn
-COMMAND_SECONDS = 5  # a wezterm command that takes longer is stuck
 ALIVE_SECONDS = 10  # the WezTerm side wrote its heartbeat this recently: it is there
-HELLO_SECONDS = 4  # how long to wait for that heartbeat at the start
+HELLO_SECONDS = 6  # how long to wait for that heartbeat at the start
+PENDING_SECONDS = 5  # an image not picked up by then is given up on
+WATCH_REFRESH_SECONDS = 3  # how often to tell the WezTerm side the pane is still watched
+POLL_SECONDS = 0.1  # between checks of the screen file
 INBOX = os.environ.get("INLINE_IMAGES_WEZTERM_INBOX") or os.path.join(
     os.path.expanduser("~"), ".local", "state", "inline-images", "wezterm"
 )
-
-
-def wezterm_binary():
-    """The `wezterm` command: on the PATH, or inside the app on macOS."""
-    found = shutil.which("wezterm")
-
-    if found:
-        return found
-
-    for candidate in (
-        "/Applications/WezTerm.app/Contents/MacOS/wezterm",
-        os.path.expanduser("~/Applications/WezTerm.app/Contents/MacOS/wezterm"),
-    ):
-        if os.access(candidate, os.X_OK):
-            return candidate
-
-    return None
 
 
 def make_inbox(path=INBOX):
@@ -103,13 +86,25 @@ def post(path, pane_id, number, data):
         with os.fdopen(descriptor, "wb") as handle:
             handle.write(data)
 
-        os.replace(temporary, os.path.join(path, "%s-%016d.osc" % (pane_id, number)))
+        final = os.path.join(path, "%s-%016d.osc" % (pane_id, number))
+        os.replace(temporary, final)
+        return final
     except BaseException:
         try:
             os.remove(temporary)
         except OSError:
             pass
         raise
+
+
+def post_text(path, text):
+    """Write a small file whole."""
+    temporary = path + ".part"
+
+    with open(temporary, "w") as handle:
+        handle.write(text)
+
+    os.replace(temporary, path)
 
 
 def cell_width(char):
@@ -202,82 +197,81 @@ class GridSize:
 
 
 class Pane:
-    """A WezTerm pane, with the three things that `Watcher` asks of an iTerm2 session."""
+    """A WezTerm pane, with the three things that `Watcher` asks of an iTerm2 session.
 
-    def __init__(self, wezterm, pane_id, inbox=INBOX):
-        self.wezterm = wezterm
+    The screen comes from `inline_images.lua`, which writes it to <inbox>/<pane>.screen
+    while this daemon keeps <inbox>/<pane>.watch fresh.
+    """
+
+    def __init__(self, pane_id, inbox=INBOX):
         self.pane_id = str(pane_id)
         self.inbox = inbox
         self.grid_size = GridSize(80, 24)
         self.drawn = []  # (top, left, rows, columns) of each image drawn, newest last
-        self.geometry_at = 0.0
-        self.last_text = None
-        self.primed = None  # a read made by the poll, for the look that follows it
         self.posted = 0
+        self.pending = []  # (path, when) of images posted and not yet picked up by WezTerm
+        self.text = None
+        self.sequence = None
+        self.stamp = None  # (mtime_ns, size) of the screen file last read
+        self.watched_at = 0.0
 
-    async def command(self, *arguments):
-        process = await asyncio.create_subprocess_exec(
-            self.wezterm,
-            "--skip-config",
-            "cli",
-            *arguments,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+    @property
+    def screen_path(self):
+        return os.path.join(self.inbox, "%s.screen" % self.pane_id)
 
+    def watch(self, now=None):
+        """Ask the WezTerm side for this pane's screen, again every few seconds."""
+        now = now or time.time()
+
+        if now - self.watched_at >= WATCH_REFRESH_SECONDS:
+            post_text(os.path.join(self.inbox, "%s.watch" % self.pane_id), "%d\n" % int(now))
+            self.watched_at = now
+
+    def read_screen(self):
+        """Read the screen file when it changed. True when there is a screen to look at."""
         try:
-            out, err = await asyncio.wait_for(process.communicate(), COMMAND_SECONDS)
-        except asyncio.TimeoutError:
-            process.kill()
-            raise RuntimeError("wezterm cli %s took more than %d s" % (arguments[0], COMMAND_SECONDS))
+            info = os.stat(self.screen_path)
+        except OSError:
+            return False
 
-        if process.returncode != 0:
-            raise RuntimeError("wezterm cli %s: %s" % (arguments[0], err.decode(errors="replace").strip()))
+        stamp = (info.st_mtime_ns, info.st_size)
 
-        return out.decode("utf-8", errors="replace")
+        if stamp != self.stamp:
+            with open(self.screen_path, encoding="utf-8", errors="replace") as handle:
+                data = handle.read()
 
-    async def geometry(self, force=False):
-        """The pane's size, read again once in a while. False when the pane is gone."""
-        now = time.monotonic()
+            head, _, text = data.partition("\n")
+            rows, columns, sequence = (int(value) for value in head.split())
+            self.grid_size = GridSize(columns, rows)
+            self.text, self.sequence, self.stamp = text, sequence, stamp
 
-        if not force and now - self.geometry_at < GEOMETRY_SECONDS:
-            return True
-
-        self.geometry_at = now
-
-        for pane in json.loads(await self.command("list", "--format", "json")):
-            if str(pane.get("pane_id")) == self.pane_id:
-                size = pane.get("size", {})
-                self.grid_size = GridSize(int(size.get("cols", 80)), int(size.get("rows", 24)))
-                return True
-
-        return False
-
-    async def read_text(self):
-        return await self.command("get-text", "--pane-id", self.pane_id)
+        return self.text is not None
 
     async def async_get_screen_contents(self):
-        if self.primed is not None:
-            text, self.primed = self.primed, None
-        else:
-            text = await self.read_text()
+        self.read_screen()
 
-        return Contents(text, self.grid_size.height, self.drawn)
+        return Contents(self.text or "", self.grid_size.height, self.drawn)
 
     async def async_inject(self, data):
-        if not is_alive(self.inbox):
-            raise RuntimeError("the WezTerm side (inline_images.lua) stopped answering")
-
         self.posted += 1
         number = int(time.time() * 1000) * 1000 + self.posted % 1000
-        await asyncio.get_running_loop().run_in_executor(None, post, self.inbox, self.pane_id, number, data)
+        path = await asyncio.get_running_loop().run_in_executor(None, post, self.inbox, self.pane_id, number, data)
+        self.pending.append((path, time.monotonic()))
+
+    def waiting(self):
+        """Whether an image is still in the inbox: until WezTerm draws it, the screen shows the
+        box glyphs where it goes, and a look would take them for a repaint and draw again."""
+        now = time.monotonic()
+        self.pending = [(path, at) for path, at in self.pending if now - at < PENDING_SECONDS and os.path.exists(path)]
+
+        return bool(self.pending)
 
 
 def sequence(row, column, columns, rows, data):
     """Save the cursor, erase the cells, draw the image over them, and restore the cursor.
 
-    WezTerm draws an image over the text in its cells and `get-text` still
-    reads that text: the erase is what lets a look tell an image cell (blank)
+    WezTerm draws an image over the text in its cells and the screen text still
+    holds that text: the erase is what lets a look tell an image cell (blank)
     from a cell that Claude Code painted again (its glyph). One sequence, which
     WezTerm parses whole, so no output of Claude Code lands between the erase and
     the image.
@@ -292,6 +286,16 @@ def sequence(row, column, columns, rows, data):
 
 
 class WeztermWatcher(Watcher):
+    # An image posted in this look is not on the screen yet: the rest of the look would
+    # read the box glyphs it replaces and draw it again.
+    async def check(self, placement, screen, boxes, above):
+        if not self.session.waiting():
+            await Watcher.check(self, placement, screen, boxes, above)
+
+    async def show(self, box, screen, above, width, now):
+        if not self.session.waiting():
+            await Watcher.show(self, box, screen, above, width, now)
+
     def encode(self, row, column, columns, rows, data):
         drawn = self.session.drawn
         # A newer image on the same cells replaces an older one.
@@ -308,28 +312,27 @@ class WeztermWatcher(Watcher):
 
 async def watch(pane, parent):
     try:
-        if not await pane.geometry(force=True):
-            emit({"ok": False, "error": "WezTerm has no pane %s" % pane.pane_id})
-            return
-    except Exception as problem:
-        emit({"ok": False, "error": "cannot reach WezTerm with `wezterm cli`: %s" % problem})
-        return
-
-    try:
         make_inbox(pane.inbox)
+        pane.watch()
     except Exception as problem:
         emit({"ok": False, "error": str(problem)})
         return
 
     waited = time.monotonic()
 
-    while not is_alive(pane.inbox):
+    # The WezTerm side answers on its next tick. A heartbeat file that exists, however
+    # old, means it is installed and WezTerm is only holding back (a hidden window):
+    # start, and draw once it answers.
+    while not (is_alive(pane.inbox) and pane.read_screen()):
         if time.monotonic() - waited > HELLO_SECONDS:
+            if os.path.exists(os.path.join(pane.inbox, "alive")):
+                break
+
             emit(
                 {
                     "ok": False,
-                    "error": "add the WezTerm side to your config: copy mod/wezterm/inline_images.lua next to wezterm.lua "
-                    "and call require('inline_images').apply(config)",
+                    "error": "add the WezTerm side to your config, or update it: copy mod/wezterm/inline_images.lua "
+                    "next to wezterm.lua and call require('inline_images').apply(config)",
                 }
             )
             return
@@ -348,35 +351,46 @@ async def watch(pane, parent):
     watcher = WeztermWatcher(pane, Overlays(), wake)
     emit({"ok": True, "ready": True})
     last_look = 0.0
-    busy = True
+    last_sequence = None
+    stale = False
 
     while os.getppid() == parent:
-        await asyncio.sleep(FAST_SECONDS if busy else SLOW_SECONDS)
+        await asyncio.sleep(POLL_SECONDS)
 
         try:
-            if not await pane.geometry():
-                debug("pane %s is gone" % pane.pane_id)
-                return
-
-            text = await pane.read_text()
+            pane.watch()
+            pane.read_screen()
         except Exception as problem:
             debug("read failed: %s" % problem)
             continue
 
+        # The WezTerm side is quiet: the config is being loaded again, or macOS holds back
+        # a WezTerm that nobody can see. Draw nothing until it answers: an image posted now
+        # would wait, and the box glyphs would be read as repaints.
+        if not is_alive(pane.inbox):
+            if not stale:
+                debug("the WezTerm side is quiet: waiting")
+            stale = True
+            continue
+
+        stale = False
+
+        if pane.waiting():
+            continue
+
         now = time.monotonic()
 
-        if text != pane.last_text:
-            pane.last_text = text
+        if pane.sequence != last_sequence:
+            last_sequence = pane.sequence
             watcher.screen_changed()
             changed.set()
 
-        busy = bool(watcher.placements) or bool(BRAILLE.search(text))
+        busy = bool(watcher.placements) or bool(BRAILLE.search(pane.text or ""))
 
         if not changed.is_set() and not (busy and now - last_look >= HEARTBEAT_SECONDS):
             continue
 
         changed.clear()
-        pane.primed = text
         last_look = now
 
         try:
@@ -385,8 +399,6 @@ async def watch(pane, parent):
             debug("a look took more than %d s: given up" % LOOK_SECONDS)
         except Exception as problem:  # one bad frame must not end the overlay
             debug("error %s: %s" % (type(problem).__name__, problem))
-        finally:
-            pane.primed = None
 
 
 def main():
@@ -399,13 +411,7 @@ def main():
         emit({"ok": False, "error": "the process that started the overlay has exited"})
         sys.exit(1)
 
-    wezterm = wezterm_binary()
-
-    if wezterm is None:
-        emit({"ok": False, "error": "the wezterm command is not on the PATH"})
-        sys.exit(2)
-
-    asyncio.run(watch(Pane(wezterm, arguments.pane), parent))
+    asyncio.run(watch(Pane(arguments.pane), parent))
 
 
 if __name__ == "__main__":

@@ -535,13 +535,13 @@ describe('the iTerm2 overlay', () => {
   test('once live, it is remembered', async ($, on) => {
     const { store, toasts } = await start($, on, [{ ok: true, ready: true }])
 
-    expect(store.overlayWorked).toBe(true)
+    expect(store['overlayWorked:iTerm2']).toBe(true)
     // The overlay then ended (the test's child exits): that is said, as before.
     expect(toasts).toEqual([expect.stringContaining('the iTerm2 overlay stopped')])
   })
 
   test('a failure after it worked in an earlier session says so', async ($, on) => {
-    const { toasts } = await start($, on, [missing], { overlayWorked: true })
+    const { toasts } = await start($, on, [missing], { 'overlayWorked:iTerm2': true })
 
     expect(toasts).toHaveLength(1)
     expect(toasts[0]).toContain('worked before')

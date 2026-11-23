@@ -59,8 +59,9 @@ const cellSizes = new Lru<number, Cell>(8)
 
 // The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
-// The $.store key set once the overlay has been live on this machine.
-const OVERLAY_WORKED = 'overlayWorked'
+// The $.store key set once the overlay has been live on this machine, per terminal:
+// one machine may run several.
+const OVERLAY_WORKED = 'overlayWorked:iTerm2'
 
 // Whether this machine can draw Mermaid diagrams (mmdc is installed): Claude
 // is told it can draw them only then.

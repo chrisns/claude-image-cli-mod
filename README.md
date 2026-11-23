@@ -195,6 +195,8 @@ Claude Code repaints only the cells that it thinks have changed. An image that i
 
 To see why the overlay is off, set the `renderer` option to `iterm`. A message then tells you the reason.
 
+If real pixels worked before, the mod tells you when they stop, even in `auto` mode. A common cause is an upgrade of Python: for example, Homebrew moves `python3` to a new version, and the `iterm2` module stays with the old one. The message names the Python that needs the module. You do not have to restart iTerm2. Install the module, then start a new Claude Code session.
+
 **The picture tears while you scroll.** In iTerm2, the overlay draws again when the screen stops moving. A picture can look broken for a moment during a fast scroll.
 
 **Over ssh.** Real pixels need the mod and the terminal on the same machine. Over ssh you see the block preview.

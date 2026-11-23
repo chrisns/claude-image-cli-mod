@@ -656,7 +656,11 @@ class Watcher:
             }
         )
         debug("draw %s rows %d-%d of %d at screen row %d, %d bytes" % (marker, first, last, rows, top + first, len(data)))
-        await self.session.async_inject(sequence(top + first, column, columns, last - first + 1, data))
+        await self.session.async_inject(self.encode(top + first, column, columns, last - first + 1, data))
+
+    def encode(self, row, column, columns, rows, data):
+        """The bytes that draw one image: a terminal other than iTerm2 may need others."""
+        return sequence(row, column, columns, rows, data)
 
 
 async def watch(connection, session_id, parent):

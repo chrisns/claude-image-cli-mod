@@ -8,6 +8,8 @@ import {
   drawsPixels,
   outputText,
   overlayMessages,
+  overlayCommand,
+  wantsWeztermOverlay,
   parseReply,
   readOptions,
   savedPath,
@@ -75,6 +77,7 @@ describe('options', () => {
       python: 'python3',
       helper: '/mod/bin/render.py',
       overlay: '/mod/bin/iterm_overlay.py',
+      weztermOverlay: '/mod/bin/wezterm_overlay.py',
       mermaid: true,
       diagramMaxRows: 40,
       mermaidTheme: 'default',
@@ -93,6 +96,35 @@ describe('options', () => {
 
   test('iterm is a renderer', () => {
     expect(readOptions({ renderer: 'iterm' }, '/mod').renderer).toBe('iterm')
+  })
+})
+
+describe('WezTerm overlay', () => {
+  test('auto turns it on in WezTerm only', () => {
+    expect(wantsWeztermOverlay('auto', 'WezTerm')).toBe(true)
+    expect(wantsWeztermOverlay('auto', 'iTerm.app')).toBe(false)
+    expect(wantsWeztermOverlay('cells', 'WezTerm')).toBe(false)
+    expect(wantsWeztermOverlay('wezterm', 'Apple_Terminal')).toBe(true)
+  })
+
+  test('wezterm is a renderer', () => {
+    expect(readOptions({ renderer: 'wezterm' }, '/mod').renderer).toBe('wezterm')
+  })
+
+  test('picks the overlay for the terminal it runs in', () => {
+    const options = readOptions({}, '/mod')
+
+    expect(overlayCommand(options, { program: 'WezTerm', weztermPane: '3' })).toEqual({
+      argv: ['/mod/bin/wezterm_overlay.py', '--pane', '3'],
+      terminal: 'WezTerm',
+    })
+    expect(overlayCommand(options, { program: 'iTerm.app', itermSession: 'w0t0p0:ABC' })).toEqual({
+      argv: ['/mod/bin/iterm_overlay.py', '--session', 'w0t0p0:ABC'],
+      terminal: 'iTerm2',
+    })
+    // WezTerm with no pane id (a pane of another mux), and other terminals: none.
+    expect(overlayCommand(options, { program: 'WezTerm' })).toBeUndefined()
+    expect(overlayCommand(options, { program: 'ghostty', weztermPane: '1' })).toBeUndefined()
   })
 })
 

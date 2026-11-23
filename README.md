@@ -68,7 +68,7 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 ## Features
 
 - **Previews in the transcript.** Each image appears under the tool call that printed it, with its name, size and format.
-- **Real pixels.** iTerm2, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
+- **Real pixels.** iTerm2, WezTerm, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
 - **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery. [See it](#images-that-claude-sends).
 - **Diagrams.** Claude can draw Mermaid diagrams: flowcharts, sequence diagrams, ER diagrams, Gantt charts, mind maps, Wardley maps and more. Each one appears as a picture in Claude's reply. [See them](#diagrams).
 - **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
@@ -114,6 +114,8 @@ Ask Claude to send you an image, and it shows under the delivery:
 |---|---|---|
 | iTerm2 | Real pixels | The [iTerm2 overlay](#real-pixels-in-iterm2). It needs the `iterm2` Python module and the Python API. |
 | iTerm2 without the Python API | Coloured blocks | The `cells` renderer. |
+| WezTerm | Real pixels | The [WezTerm overlay](#real-pixels-in-wezterm). It needs one line in your WezTerm config. |
+| WezTerm without that line | Coloured blocks | The `cells` renderer. |
 | kitty, Ghostty | Real pixels | Claude Code's own `Image` element, which uses the kitty graphics protocol. |
 | Any other terminal | Coloured blocks | The `cells` renderer. Each cell holds 2 by 2 blocks of colour. |
 
@@ -133,7 +135,7 @@ Change the options in the config menu of Claude Code, or under `pluginConfigs` i
 
 | Option | Default | What it does |
 |---|---|---|
-| `renderer` | `auto` | `auto` uses `iterm` in iTerm2, `image` in kitty and Ghostty, and `cells` in other terminals. You can also set `iterm`, `image` or `cells`. |
+| `renderer` | `auto` | `auto` uses `iterm` in iTerm2, `wezterm` in WezTerm, `image` in kitty and Ghostty, and `cells` in other terminals. You can also set `iterm`, `wezterm`, `image` or `cells`. |
 | `max_columns` | `100` | The widest that a preview can be, from 1 to 255 columns. A preview is never wider than the transcript. |
 | `max_rows` | `28` | The tallest that a preview can be, from 1 to 255 rows. |
 | `palette` | `0` | Reduce a block preview to this many colours, from 0 to 256. `0` keeps all colours. A value near `32` can look cleaner on a busy picture. |
@@ -172,6 +174,30 @@ Claude Code repaints only the cells that it thinks have changed. An image that i
 - If Claude Code repaints part of an image in place, the overlay draws the image again.
 - A box that the edge of the screen cuts gets a cropped image.
 - A large image goes as a chunked `MultipartFile` in one write. iTerm2 prints a single `File=` sequence of about 1 MB as text.
+
+</details>
+
+### Real pixels in WezTerm
+
+WezTerm does not draw kitty Unicode placeholders either, so the mod uses the same overlay idea as in iTerm2:
+
+1. Copy [`mod/wezterm/inline_images.lua`](mod/wezterm/inline_images.lua) next to your `wezterm.lua`, and add this line before `return config`:
+
+   ```lua
+   require('inline_images').apply(config)
+   ```
+
+2. [`mod/bin/wezterm_overlay.py`](mod/bin/wezterm_overlay.py) starts with the session. The Lua file writes the pane's screen text to a file for it (`pane:get_lines_as_text`), and the overlay finds the boxes there by their markers. It does not use `wezterm cli get-text`: that call sends every image in the pane with the text, and polling it stalls WezTerm.
+3. It puts each image, as one escape sequence, in `~/.local/state/inline-images/wezterm` (a folder only you can open). The Lua file hands it to `pane:inject_output`.
+
+<details>
+<summary>Why not write to the pane's tty?</summary>
+
+- Bytes that another process writes to the tty mix with Claude Code's own output. A large image then breaks in the middle, and its base64 shows as text. `inject_output` runs inside WezTerm, between whole actions of Claude Code's output.
+- `inject_output` does not repaint the window, so the Lua file changes the window's right status to one or two spaces after each image, and WezTerm repaints. A right status of your own is overwritten until your next `update-status`.
+- The Lua file works on WezTerm's `update-status` event, so images show within one `status_update_interval`. It sets 250 ms unless your config sets a value first. Timers do not work here: WezTerm loads the config again often, and a timer started then fires late or never.
+- WezTerm draws only a single `File=` sequence; it ignores `MultipartFile`.
+- The screen text cannot tell an image cell from a text cell: WezTerm draws an image over the text in its cells. So the overlay erases the cells before it draws the image. A blank cell where it drew is an image cell; a glyph there means Claude Code painted the cell again.
 
 </details>
 

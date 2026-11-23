@@ -1,13 +1,14 @@
 import { baseName, describe, extract, formatBytes, type InlineHead } from './osc1337.ts'
 
 export type Options = {
-  renderer: 'auto' | 'cells' | 'image' | 'iterm'
+  renderer: 'auto' | 'cells' | 'image' | 'iterm' | 'wezterm'
   maxColumns: number
   maxRows: number
   palette: number
   python: string
   helper: string
   overlay: string
+  weztermOverlay: string
   mermaid: boolean
   diagramMaxRows: number
   mermaidTheme: 'default' | 'neutral' | 'dark' | 'forest'
@@ -168,7 +169,8 @@ export function readOptions(
     typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
 
   return {
-    renderer: renderer === 'cells' || renderer === 'image' || renderer === 'iterm' ? renderer : 'auto',
+    renderer:
+      renderer === 'cells' || renderer === 'image' || renderer === 'iterm' || renderer === 'wezterm' ? renderer : 'auto',
     maxColumns: Math.round(Math.max(1, Math.min(255, number(options.max_columns, 100)))),
     maxRows: Math.round(Math.max(1, Math.min(255, number(options.max_rows, 28)))),
     // render.py takes whole numbers only.
@@ -176,6 +178,7 @@ export function readOptions(
     python: typeof options.python === 'string' && options.python !== '' ? options.python : 'python3',
     helper: `${root}/bin/render.py`,
     overlay: `${root}/bin/iterm_overlay.py`,
+    weztermOverlay: `${root}/bin/wezterm_overlay.py`,
     mermaid: options.mermaid !== false,
     diagramMaxRows: Math.round(Math.max(1, Math.min(255, number(options.diagram_max_rows, 40)))),
     mermaidTheme:
@@ -188,6 +191,27 @@ export function readOptions(
 /** Whether to draw real pixels over the cells with the iTerm2 overlay. */
 export function wantsOverlay(renderer: Options['renderer'], program: string | undefined): boolean {
   return renderer === 'iterm' || (renderer === 'auto' && program === 'iTerm.app')
+}
+
+/** Whether to draw real pixels over the cells with the WezTerm overlay. */
+export function wantsWeztermOverlay(renderer: Options['renderer'], program: string | undefined): boolean {
+  return renderer === 'wezterm' || (renderer === 'auto' && program === 'WezTerm')
+}
+
+/** The overlay to start here, as the command after the Python, or undefined for none. */
+export function overlayCommand(
+  options: Pick<Options, 'renderer' | 'overlay' | 'weztermOverlay'>,
+  env: { program?: string; itermSession?: string; weztermPane?: string },
+): { argv: string[]; terminal: 'iTerm2' | 'WezTerm' } | undefined {
+  if (env.itermSession !== undefined && wantsOverlay(options.renderer, env.program)) {
+    return { argv: [options.overlay, '--session', env.itermSession], terminal: 'iTerm2' }
+  }
+
+  if (env.weztermPane !== undefined && wantsWeztermOverlay(options.renderer, env.program)) {
+    return { argv: [options.weztermOverlay, '--pane', env.weztermPane], terminal: 'WezTerm' }
+  }
+
+  return undefined
 }
 
 /** The overlay's one-line JSON messages, from the text it has written so far. */

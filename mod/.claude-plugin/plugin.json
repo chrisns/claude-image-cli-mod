@@ -1,7 +1,7 @@
 {
   "name": "inline-images",
-  "version": "0.4.1",
-  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, kitty and Ghostty; coloured blocks everywhere else.",
+  "version": "0.5.0",
+  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, WezTerm, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",
     "url": "https://github.com/chrisns"
@@ -30,11 +30,12 @@
       "options": [
         "auto",
         "iterm",
+        "wezterm",
         "image",
         "cells"
       ],
       "default": "auto",
-      "description": "auto: real pixels in iTerm2 (iterm) and in kitty and Ghostty (image), block characters elsewhere. iterm: draw over the block preview with the iTerm2 inline images protocol; needs `pip install iterm2` and the iTerm2 Python API. image: the kitty graphics protocol. cells: block characters, every terminal."
+      "description": "auto: real pixels in iTerm2 (iterm), WezTerm (wezterm) and in kitty and Ghostty (image), block characters elsewhere. iterm: draw over the block preview with the iTerm2 inline images protocol; needs `pip install iterm2` and the iTerm2 Python API. wezterm: the same over `wezterm cli`. image: the kitty graphics protocol. cells: block characters, every terminal."
     },
     "max_columns": {
       "title": "Widest preview (columns)",

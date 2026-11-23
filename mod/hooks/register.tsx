@@ -57,7 +57,7 @@ const scans = new Lru<string, Promise<Scanned>>(32)
 // One terminal cell in pixels, by the width of the screen: it changes with the font.
 const cellSizes = new Lru<number, Cell>(8)
 
-// The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
+// The overlay (bin/iterm_overlay.py or bin/wezterm_overlay.py): `live` once it watches the screen.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
 // The $.store key set once the overlay has been live on this machine, per terminal:
 // one machine may run several.

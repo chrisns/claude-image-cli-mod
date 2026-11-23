@@ -59,6 +59,8 @@ const cellSizes = new Lru<number, Cell>(8)
 
 // The iTerm2 overlay (bin/iterm_overlay.py): `live` once it watches the screen.
 let overlay: 'off' | 'starting' | 'live' | 'failed' = 'off'
+// The $.store key set once the overlay has been live on this machine.
+const OVERLAY_WORKED = 'overlayWorked'
 
 // Whether this machine can draw Mermaid diagrams (mmdc is installed): Claude
 // is told it can draw them only then.
@@ -603,6 +605,9 @@ export const register: Register = (on, settings) => {
               overlay = 'live'
               // Rows drawn before now have no marker: draw them again.
               $.ui.invalidate('ui.render')
+              // Remembered across sessions: once real pixels have worked here, losing
+              // them is a breakage to report, not a setup never done.
+              void $.store.set(OVERLAY_WORKED, true).catch(() => undefined)
             } else if (message.ok === false && message.error !== undefined) {
               reason = message.error
             }
@@ -618,11 +623,20 @@ export const register: Register = (on, settings) => {
       $.ui.invalidate('ui.render')
 
       const why = reason || lastError || 'the overlay stopped'
-      const message = `inline-images: ${wasLive ? 'the iTerm2 overlay stopped' : 'block previews only, no real pixels in iTerm2'}: ${why}`
+      // Real pixels worked in an earlier session and fail at the start of this one:
+      // something changed (a Python upgrade that left the iterm2 module behind, the
+      // Python API turned off).
+      const workedBefore = !wasLive && (await $.store.get(OVERLAY_WORKED).catch(() => undefined)) === true
+      const message = wasLive
+        ? `inline-images: the iTerm2 overlay stopped: ${why}`
+        : workedBefore
+          ? `inline-images: real pixels in iTerm2 worked before but not in this session, so block previews only: ${why}. Fix it, then start a new session.`
+          : `inline-images: block previews only, no real pixels in iTerm2: ${why}`
 
       // Asked for by name, the person hears why it is off. In auto mode a missing
-      // setup (no iterm2 module, no Python API) is the normal case: debug log only.
-      if (options.renderer === 'iterm' || wasLive) {
+      // setup (no iterm2 module, no Python API) is the normal case: debug log only,
+      // unless it worked here before.
+      if (options.renderer === 'iterm' || wasLive || workedBefore) {
         $.ui.toast(message)
       } else {
         $.ui.log(message, { to: 'debug' })

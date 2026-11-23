@@ -498,3 +498,59 @@ describe('Mermaid diagrams in replies', () => {
     expect(sections.map((section: { id: string }) => section.id)).toEqual(['base'])
   })
 })
+
+describe('the iTerm2 overlay', () => {
+  const ITERM = { TERM_PROGRAM: 'iTerm.app', ITERM_SESSION_ID: 'w0t0p0:ABC' }
+
+  /** Start a session whose overlay writes `lines`, and collect the toasts. */
+  async function start($: any, on: any, lines: object[], stored: Record<string, unknown> = {}) {
+    const helper = world(on)
+    const toasts: string[] = []
+    const store: Record<string, unknown> = { ...stored }
+    mock.env(on, ITERM)
+    // The plugin's own store, in memory, kept where the test can read what was written.
+    on('store.get', (_$: unknown, e: { key: string }) => ({ value: store[e.key] }))
+    on('store.set', (_$: unknown, e: { key: string; value: unknown }) => {
+      store[e.key] = e.value
+      return { value: undefined }
+    })
+    on('ui.toast', (_$: unknown, e: { text: string }) => {
+      toasts.push(e.text)
+      return { value: undefined }
+    })
+    on('ui.log', () => ({ value: undefined }))
+    on('process.spawn', async function* () {
+      yield { stream: 'stdout', text: lines.map(line => `${JSON.stringify(line)}\n`).join('') }
+      return { value: { code: 0, signal: null } }
+    })
+    on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+    await helper.clock.settle()
+
+    return { toasts, store }
+  }
+
+  const missing = { ok: false, error: 'the iterm2 Python module is not installed for Python 3.15' }
+
+  test('once live, it is remembered', async ($, on) => {
+    const { store, toasts } = await start($, on, [{ ok: true, ready: true }])
+
+    expect(store.overlayWorked).toBe(true)
+    // The overlay then ended (the test's child exits): that is said, as before.
+    expect(toasts).toEqual([expect.stringContaining('the iTerm2 overlay stopped')])
+  })
+
+  test('a failure after it worked in an earlier session says so', async ($, on) => {
+    const { toasts } = await start($, on, [missing], { overlayWorked: true })
+
+    expect(toasts).toHaveLength(1)
+    expect(toasts[0]).toContain('worked before')
+    expect(toasts[0]).toContain('Python 3.15')
+  })
+
+  test('a setup never done stays quiet in auto mode', async ($, on) => {
+    const { toasts } = await start($, on, [missing])
+
+    expect(toasts).toEqual([])
+  })
+})

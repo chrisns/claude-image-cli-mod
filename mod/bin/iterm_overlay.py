@@ -755,7 +755,15 @@ def main():
     try:
         import iterm2
     except ImportError:
-        emit({"ok": False, "error": "the iterm2 Python module is not installed: run `python3 -m pip install iterm2`"})
+        # Name the Python: an upgrade (Homebrew moving python3 to a new minor
+        # version) leaves the module behind in the old one.
+        emit(
+            {
+                "ok": False,
+                "error": "the iterm2 Python module is not installed for Python %d.%d (%s): run `%s -m pip install iterm2`"
+                % (sys.version_info[0], sys.version_info[1], sys.executable, sys.executable),
+            }
+        )
         sys.exit(2)
 
     try:

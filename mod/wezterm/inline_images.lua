@@ -55,6 +55,21 @@ local function write_atomic(path, data)
   os.rename(temporary, path)
 end
 
+-- The viewport as text, one line per row. Not pane:get_lines_as_text: it trims the
+-- whole text after each row, so blank rows vanish and every row below a blank one is
+-- reported higher up than it is; the overlay then drew images, and erased cells, on the
+-- wrong rows.
+function M.screen_text(pane, size)
+  local top = size.physical_top
+  local rows = {}
+  for row = top, top + size.viewport_rows - 1 do
+    local ok, line = pcall(pane.get_text_from_region, pane, 0, row, size.cols, row)
+    line = ok and type(line) == 'string' and line or ''
+    rows[#rows + 1] = (line:gsub('\n', ''):gsub('%s+$', ''))
+  end
+  return table.concat(rows, '\n')
+end
+
 -- The screen of each pane whose overlay touched <id>.watch lately, as <id>.screen:
 -- a line "rows columns sequence", then the rows. Written only when it changed.
 function M.screens(inbox)
@@ -72,7 +87,7 @@ function M.screens(inbox)
       local found, pane = pcall(wezterm.mux.get_pane, id)
       if found and pane then
         local size = pane:get_dimensions()
-        local text = pane:get_lines_as_text(size.viewport_rows)
+        local text = M.screen_text(pane, size)
         local key = size.cols .. 'x' .. size.viewport_rows .. '\n' .. text
         if screens[id] ~= key then
           screens[id] = key

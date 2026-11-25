@@ -208,8 +208,25 @@ class Overlays:
         top = round(picture.height * first / rows)
         bottom = round(picture.height * (last + 1) / rows)
         out = io.BytesIO()
-        # Level 1: the PNG goes straight to iTerm2 on this machine, so speed beats size.
-        picture.crop((0, top, picture.width, bottom)).save(out, "PNG", compress_level=1)
+
+        if getattr(picture, "n_frames", 1) > 1:
+            # An animation (render.py wrote a GIF): every frame cut, so it plays on.
+            frames = []
+            durations = []
+
+            for index in range(picture.n_frames):
+                picture.seek(index)
+                frames.append(picture.convert("RGBA").crop((0, top, picture.width, bottom)))
+                durations.append(picture.info.get("duration", 100))
+
+            picture.seek(0)
+            frames[0].save(
+                out, "GIF", save_all=True, append_images=frames[1:], duration=durations, loop=picture.info.get("loop", 0), disposal=2
+            )
+        else:
+            # Level 1: the PNG goes straight to iTerm2 on this machine, so speed beats size.
+            picture.crop((0, top, picture.width, bottom)).save(out, "PNG", compress_level=1)
+
         found = out.getvalue()
         self.crops[key] = found
         self.crop_bytes += len(found)

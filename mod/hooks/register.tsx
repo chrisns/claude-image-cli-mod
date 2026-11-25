@@ -203,6 +203,81 @@ function drawModel($: EngineInterface, options: Options, path: string, key: stri
   })
 }
 
+// Animations being played, by site and element: one loop each, however often the row is drawn.
+const playing = new Set<string>()
+// An animation stops after this long, on whatever frame it is on: a GIF far back in a
+// long session should not paint for ever.
+const PLAY_MS = 10 * 60 * 1000
+
+type Frame = { duration: number; path?: string; cells?: string }
+
+/**
+ * Play the frames of an animated picture in a mounted element with $.ui.blit: a
+ * keyed Image gets each frame's PNG, a keyed Raster each frame's cells. It stops
+ * when the element is gone (the blit is refused), after the picture's own loops, or
+ * after PLAY_MS; the next draw of the row starts it again.
+ */
+function play($: EngineInterface, requestId: string, key: string, frames: Frame[], loop: number) {
+  const id = `${requestId}\u0000${key}`
+
+  if (playing.has(id) || frames.length < 2) {
+    return
+  }
+
+  playing.add(id)
+  let at = 0
+  let rounds = 0
+  let played = 0
+  // The row may not be on the screen yet when the first frame is due: a refusal
+  // then is tried again for a few seconds before it means the element is gone.
+  let isShown = false
+  let waits = 0
+
+  const step = () => {
+    at += 1
+
+    if (at === frames.length) {
+      at = 0
+      rounds += 1
+    }
+
+    const frame = frames[at]
+
+    if (frame === undefined || (loop > 0 && rounds >= loop) || played > PLAY_MS) {
+      playing.delete(id)
+      return
+    }
+
+    const args =
+      frame.path !== undefined
+        ? { requestId, key, source: { file: frame.path, format: 'png' as const } }
+        : { requestId, key, cells: frame.cells ?? '' }
+
+    void $.ui
+      .blit(args as never)
+      .then(result => {
+        if (typeof result === 'object' && result !== null && 'deny' in result && result.deny !== undefined) {
+          if (!isShown && waits < 20) {
+            waits += 1
+            at -= 1
+            $.clock.after(250, step)
+            return
+          }
+
+          playing.delete(id)
+          return
+        }
+
+        isShown = true
+        played += frame.duration
+        $.clock.after(frame.duration, step)
+      })
+      .catch(() => playing.delete(id))
+  }
+
+  $.clock.after(frames[0]?.duration ?? 100, step)
+}
+
 /** The images of a saved output, read once until a picture of it fails. */
 function scanSaved($: EngineInterface, options: Options, saved: string): Promise<Scanned> {
   return remember(scans, saved, async () => {
@@ -447,6 +522,30 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
         String(cell?.height ?? DEFAULT_CELL.height),
         ...(head.isAspectPreserved ? [] : ['--stretch']),
       ]
+
+      // An animation plays in the element once it is drawn: frames for the terminal's kind.
+      // Not under an overlay: it draws the animated picture itself, and changing cells
+      // under it would read as Claude Code painting them.
+      const animate = async (kind: 'png' | 'cells', key: string) => {
+        if (stored === undefined || stored.frames < 2 || asText || (kind === 'cells' && usesOverlay)) {
+          return
+        }
+
+        const extra = kind === 'cells' ? ['--palette', String(options.palette)] : []
+        const found = await run<{ frames: Frame[]; loop?: number }>(['frames', stored.path, '--as', kind, ...size, ...extra]).catch(
+          () => undefined,
+        )
+
+        if (found !== undefined && found.frames.length > 1) {
+          play($, e.requestId, key, found.frames, found.loop ?? 0)
+        }
+      }
+
+      if (isPixels) {
+        await animate('png', `inline-image-${index}`)
+      } else {
+        await animate('cells', `inline-image-${index}`)
+      }
 
       const drawn = isPixels ? (
         <Image

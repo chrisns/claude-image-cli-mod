@@ -77,6 +77,7 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 - **Large images.** Claude Code cuts tool output at 30,000 characters. The mod reads the whole output from the file where Claude Code saves it.
 - **The right shape.** The mod measures your terminal's cell size and keeps the picture's aspect ratio.
 - **The whole protocol.** `File=`, chunked `MultipartFile`, the tmux passthrough wrapper, the `BEL` and `ST` terminators, `width`, `height` and `preserveAspectRatio`. A download (`inline=0`) is not shown, and its note says so.
+- **Animations.** An animated GIF, WebP or PNG plays: natively in iTerm2 and WezTerm, frame by frame in kitty, Ghostty and the block preview. [See how](#animations).
 - **Transparency** and several images in one command.
 
 ### Diagrams
@@ -108,6 +109,17 @@ Without `mmdc`, Claude is not told about diagrams, and ```` ```mermaid ```` bloc
 Ask Claude to send you an image, and it shows under the delivery:
 
 ![Claude delivers earth.jpg with SendUserFile, and the photo appears under the delivery](docs/screenshots/deliver.gif)
+
+### Animations
+
+An animated GIF, WebP or PNG plays in the transcript, as it does in a browser:
+
+- In iTerm2 and WezTerm, the overlay draws the animation as one GIF, and the terminal plays it. Claude Code is not involved, so it costs nothing while it plays.
+- In kitty and Ghostty, the mod swaps each frame into the picture, at the frame's own speed.
+- In other terminals, the block preview plays frame by frame.
+- It keeps the picture's own timing and number of loops. A frame shorter than 20 ms shows for 100 ms, as browsers do.
+- In kitty, Ghostty and the block preview, an animation stops after 10 minutes, so an old GIF far back in a session does not keep repainting. Draw the row again (scroll to it, or resize) to start it again.
+- An animation of more than 300 frames, or one too large for its box, shows its first frame.
 
 ### 3D models
 

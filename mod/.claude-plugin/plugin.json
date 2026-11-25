@@ -1,7 +1,7 @@
 {
   "name": "inline-images",
-  "version": "0.6.0",
-  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, the Mermaid diagrams Claude draws (Wardley maps too), and 3D models (STL, OBJ, 3MF, PLY) from four sides, in the Claude Code transcript. Real pixels in iTerm2, WezTerm, kitty and Ghostty; coloured blocks everywhere else.",
+  "version": "0.7.0",
+  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you (animated GIFs play), the Mermaid diagrams Claude draws (Wardley maps too), and 3D models (STL, OBJ, 3MF, PLY) from four sides, in the Claude Code transcript. Real pixels in iTerm2, WezTerm, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",
     "url": "https://github.com/chrisns"
@@ -11,6 +11,7 @@
   "license": "MIT",
   "keywords": [
     "3d-models",
+    "animated-gif",
     "diagrams",
     "ghostty",
     "images",

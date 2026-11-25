@@ -46,7 +46,7 @@ describe('caption', () => {
   test('says which frame of an animation it shows', () => {
     const found = { path: '/x', format: 'GIF', width: 10, height: 10, frames: 12, bytes: 10 }
 
-    expect(caption(head, found)).toContain('frame 1 of 12')
+    expect(caption(head, found)).toContain('12 frames')
   })
 
   test('falls back to what the sender declared', () => {

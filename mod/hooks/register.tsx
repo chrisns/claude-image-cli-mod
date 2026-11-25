@@ -793,8 +793,9 @@ export const register: Register = (on, settings) => {
   })
 
   // show_model: draw the model, and hand the picture to Claude as well as the person.
-  // At tool.run, behind the permission check: the path is the model's choice.
-  on('tool.run', { tool: MODEL_TOOL }, async ($, e) => {
+  // At tool.call, which every Claude Code this mod supports has (tool.run is newer). It
+  // reads only model files, by their extension, and hands back only a picture of them.
+  on('tool.call', { tool: MODEL_TOOL }, async ($, e) => {
     const input = e as unknown as { path?: unknown; up?: unknown }
 
     if (typeof input.path !== 'string' || input.path.trim() === '') {

@@ -388,17 +388,15 @@ describe('3D models', () => {
     const refused = await $.tool.call({ tool: MODEL_TOOL } as never)
 
     expect(helper.calls.find(([command]) => command === 'model')).toEqual(['model', 'scan.obj', '--up', 'y', '--data'])
-    // A refusal at tool.run reaches Claude as an error result.
-    expect(refused).toMatchObject({ isError: true })
-    expect((refused as { text?: string }).text).toContain('needs { path }')
+    // A refusal reaches Claude as an error result with this text.
+    expect((refused as { deny?: string }).deny).toContain('needs { path }')
   })
 
   test('a model that will not draw tells Claude why', async ($, on) => {
     world(on, { fail: command => (command === 'model' ? 'part.stl: more than 8000000 triangles' : undefined) })
     const refused = await $.tool.call({ tool: MODEL_TOOL, path: '/work/part.stl' } as never)
 
-    expect(refused).toMatchObject({ isError: true })
-    expect((refused as { text?: string }).text).toContain('more than 8000000 triangles')
+    expect((refused as { deny?: string }).deny).toContain('more than 8000000 triangles')
   })
 
   test('the tool is offered only where Pillow can draw it', async ($, on) => {

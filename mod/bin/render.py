@@ -66,7 +66,7 @@ from array import array
 MAX_PIXELS = 40_000_000
 
 try:
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageOps, ImageSequence
 
     # Pillow only warns between its limit and twice that; here a warning is an error.
     Image.MAX_IMAGE_PIXELS = MAX_PIXELS
@@ -1044,7 +1044,7 @@ def command_cells(arguments):
     png = None
 
     if with_marker:
-        png, _, _ = write_box_png(kind, image, width, height, arguments)
+        png, _, _ = write_box_png(kind, image, width, height, arguments, animate=True)
         marker = overlay_marker(png, arguments)
 
     background = parse_background(arguments.background)
@@ -1116,10 +1116,54 @@ def nearest(pixels, width, height, out_width, out_height):
     return out.tobytes()
 
 
-def write_box_png(kind, image, width, height, arguments):
+# An animation is drawn moving only up to these: past them, its first frame stands still.
+ANIMATION_MAX_FRAMES = 300
+ANIMATION_MAX_PIXELS = 150_000_000  # the box's pixels, times the frames
+MIN_FRAME_MS = 20  # browsers play a shorter frame (GIF's 0 or 10 ms) at 100 ms, so does this
+
+
+def animation_frames(path, out_width, out_height, stretch):
+    """Every frame of an animated picture (GIF, WebP, APNG) scaled into a box of
+    `out_width` by `out_height` pixels, as (RGBA images, milliseconds each, loops),
+    or None for a still picture, one too large to animate, or without Pillow."""
+    if not HAVE_PILLOW:
+        return None
+
+    with Image.open(path) as source:
+        count = getattr(source, "n_frames", 1)
+
+        if count < 2 or count > ANIMATION_MAX_FRAMES or out_width * out_height * count > ANIMATION_MAX_PIXELS:
+            return None
+
+        loop = source.info.get("loop", 0)
+        frames = []
+        durations = []
+
+        # Pillow hands each frame whole, the frames before it already laid under it.
+        for frame in ImageSequence.Iterator(source):
+            picture = frame.convert("RGBA")
+
+            if stretch:
+                placed = picture.resize((out_width, out_height), Image.Resampling.LANCZOS)
+            else:
+                scale = min(out_width / picture.width, out_height / picture.height)
+                size = (max(1, round(picture.width * scale)), max(1, round(picture.height * scale)))
+                placed = Image.new("RGBA", (out_width, out_height), (0, 0, 0, 0))
+                placed.paste(picture.resize(size, Image.Resampling.LANCZOS), ((out_width - size[0]) // 2, (out_height - size[1]) // 2))
+
+            frames.append(placed)
+            duration = frame.info.get("duration") or 0
+            durations.append(int(duration) if duration >= MIN_FRAME_MS else 100)
+
+    return frames, durations, loop
+
+
+def write_box_png(kind, image, width, height, arguments, animate=False):
     """A PNG with the exact shape of the box, the picture centred in it.
 
-    For Pillow, `image` is what `decode` returned.
+    For Pillow, `image` is what `decode` returned. With `animate`, an animated
+    picture gives an animated GIF of the same shape instead: iTerm2 and WezTerm
+    play it, and iterm_overlay.py draws it as it draws a PNG.
     """
     box_width, box_height = box_pixels(arguments)
     fit = min(box_width / width, box_height / height)
@@ -1152,7 +1196,16 @@ def write_box_png(kind, image, width, height, arguments):
         ".stretch" if arguments.stretch else "",
     )
 
-    if HAVE_PILLOW:
+    animated = animation_frames(arguments.path, out_width, out_height, arguments.stretch) if animate and kind == "pillow" else None
+
+    if animated is not None:
+        frames, durations, loop = animated
+        out_path = out_path[: -len(".png")] + ".gif"
+        out = io.BytesIO()
+        # disposal 2: each frame is drawn on a cleared box, as the frames are whole.
+        frames[0].save(out, "GIF", save_all=True, append_images=frames[1:], duration=durations, loop=loop, disposal=2)
+        write_atomic(out_path, out.getvalue())
+    elif HAVE_PILLOW:
         out = io.BytesIO()
         Image.frombytes("RGBA", (out_width, out_height), pixels).save(out, "PNG")
         write_atomic(out_path, out.getvalue())
@@ -1160,6 +1213,80 @@ def write_box_png(kind, image, width, height, arguments):
         write_atomic(out_path, png_bytes(out_width, out_height, pixels))
 
     return out_path, out_width, out_height
+
+
+FRAMES_MAX_REPLY = 3_000_000  # characters of cells in one reply: the mod reads 4 MB of it
+
+
+def command_frames(arguments):
+    """Every frame of an animated picture, for the mod to play: PNG files for a
+    terminal that draws pixels, or cells for one that draws blocks. Each with how
+    long it shows, in milliseconds. A still picture, or one too large to animate,
+    has no frames."""
+    check_box(arguments)
+    path = arguments.path
+    read_stored(path)  # in use: a prune keeps it; gone: the reply says so
+
+    if arguments.kind == "png":
+        box_width, box_height = (max(1, round(value)) for value in box_pixels(arguments))
+        animated = animation_frames(path, box_width, box_height, arguments.stretch)
+
+        if animated is None:
+            print(json.dumps({"ok": True, "frames": []}))
+            return
+
+        frames, durations, loop = animated
+        key = hashlib.sha256(("%s:%d:%d:%d" % (path, box_width, box_height, arguments.stretch)).encode()).hexdigest()[:24]
+        folder = secure_folder(os.path.join(cache_dir(), "frames"))
+        reply = []
+
+        for index, (frame, duration) in enumerate(zip(frames, durations)):
+            frame_path = os.path.join(folder, "%s.%d.png" % (key, index))
+
+            if not os.path.isfile(frame_path):
+                out = io.BytesIO()
+                frame.save(out, "PNG", compress_level=1)
+                write_atomic(frame_path, out.getvalue())
+            else:
+                os.utime(frame_path)
+
+            reply.append({"path": frame_path, "duration": duration})
+
+        print(json.dumps({"ok": True, "frames": reply, "loop": loop}))
+        return
+
+    grid_width, grid_height = arguments.columns * 2, arguments.rows * 2
+    animated = animation_frames(path, grid_width, grid_height, True)
+
+    if animated is None:
+        print(json.dumps({"ok": True, "frames": []}))
+        return
+
+    # Laid out as `cells` lays out a still: the picture's true shape in the cells' shape.
+    with Image.open(path) as source:
+        width, height = source.size
+
+    frames, durations, loop = animated
+    background = parse_background(arguments.background)
+    reply = []
+
+    for frame, duration in zip(frames, durations):
+        # Back to the picture's own size, then placed as `cells` places a still.
+        picture = frame.resize((width, height)) if not arguments.stretch else frame
+        pixels = place(
+            "pillow", picture, picture.width, picture.height, grid_width, grid_height,
+            arguments.cell_width / 2, arguments.cell_height / 2, arguments.stretch,
+        )
+        reply.append({"cells": build_cells(pixels, arguments.columns, arguments.rows, background, arguments.palette), "duration": duration})
+
+    # Too many characters for one reply: every other frame, each shown twice as long.
+    while len(reply) > 2 and sum(len(frame["cells"]) for frame in reply) > FRAMES_MAX_REPLY:
+        reply = [
+            {"cells": reply[index]["cells"], "duration": reply[index]["duration"] + (reply[index + 1]["duration"] if index + 1 < len(reply) else 0)}
+            for index in range(0, len(reply), 2)
+        ]
+
+    print(json.dumps({"ok": True, "frames": reply if len(reply) > 1 else [], "loop": loop}))
 
 
 def command_png(arguments):
@@ -1537,6 +1664,18 @@ def main():
     model.add_argument("--up", choices=("z", "y"), default="z", help="the model's up axis (z: slicers and CAD)")
     model.add_argument("--data", action="store_true", help="also report the picture itself, as base64")
     model.set_defaults(run=command_model)
+
+    frames = commands.add_parser("frames", help="every frame of an animated picture, for the mod to play")
+    frames.add_argument("path")
+    frames.add_argument("--as", dest="kind", choices=("png", "cells"), required=True)
+    frames.add_argument("--columns", type=int, required=True)
+    frames.add_argument("--rows", type=int, required=True)
+    frames.add_argument("--cell-width", type=float, default=8)
+    frames.add_argument("--cell-height", type=float, default=16)
+    frames.add_argument("--stretch", action="store_true")
+    frames.add_argument("--background", default="202020")
+    frames.add_argument("--palette", type=int, default=0)
+    frames.set_defaults(run=command_frames)
 
     png = commands.add_parser("png")
     png.add_argument("path")

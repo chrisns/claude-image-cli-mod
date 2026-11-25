@@ -29,6 +29,8 @@ type Helper = {
   fail?: (command: string) => string | undefined
   noMermaid?: boolean
   noPillow?: boolean
+  /** Frames the inspected image has: more than one is an animation. */
+  frames?: number
   /** Milliseconds a command takes, as the plugin's clock reads them. */
   slow?: (command: string) => number
   clock: ReturnType<typeof mock.clock>
@@ -88,8 +90,16 @@ function world(on: any, helper: Partial<Helper> = {}): Helper {
         size: [45, 10, 6],
         ...(rest.includes('--data') ? { data: PNG } : {}),
       }
+    } else if (command === 'frames') {
+      const kind = value('--as')
+      const count = state.frames ?? 1
+      reply = {
+        ok: true,
+        loop: 0,
+        frames: count < 2 ? [] : Array.from({ length: count }, (_, at) => (kind === 'png' ? { path: `/cache/frames/f.${at}.png`, duration: 80 } : { cells: `cells-${at}`, duration: 80 })),
+      }
     } else if (command === 'inspect') {
-      reply = STORED
+      reply = { ...STORED, frames: state.frames ?? 1 }
     } else if (command === 'cell') {
       reply = { ok: true, width: 8, height: 16 }
     } else if (command === 'png') {
@@ -364,6 +374,86 @@ describe('delivered files', () => {
       '--name',
       'photo.jpg',
     ])
+  })
+})
+
+describe('animations', () => {
+  const gifRow = { tool_use_id: 'row-1', tool: 'Bash', output: { stdout: `${image('spin.gif')}\n`, stderr: '' }, isErrored: false }
+  const blits = (on: any) => {
+    const seen: Record<string, unknown>[] = []
+    on('ui.blit', (_$: unknown, e: Record<string, unknown>) => {
+      seen.push(e)
+      return { value: {} }
+    })
+    return seen
+  }
+
+  test('a GIF plays in the block preview, frame after frame', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on, { frames: 3 })
+    engineRow(on)
+    const seen = blits(on)
+    await mountRow($, gifRow)
+    await helper.clock.advance(300)
+
+    expect(helper.calls.find(([command]) => command === 'frames')?.slice(0, 4)).toEqual(['frames', '/cache/abc.png', '--as', 'cells'])
+    expect(seen.map(blit => blit.cells)).toEqual(['cells-1', 'cells-2', 'cells-0'])
+    expect(seen[0]).toMatchObject({ requestId: 'row-1', key: 'inline-image-0' })
+  })
+
+  test('in kitty or Ghostty each frame is a PNG swapped into the Image', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'ghostty', TERM: 'xterm-ghostty' })
+    const helper = world(on, { frames: 2 })
+    engineRow(on)
+    const seen = blits(on)
+    await mountRow($, gifRow)
+    await helper.clock.advance(200)
+
+    expect(helper.calls.find(([command]) => command === 'frames')?.slice(0, 4)).toEqual(['frames', '/cache/abc.png', '--as', 'png'])
+    expect(seen[0]).toMatchObject({ key: 'inline-image-0', source: { file: '/cache/frames/f.1.png', format: 'png' } })
+  })
+
+  test('under the WezTerm overlay the cells stay still: the overlay plays the GIF', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'WezTerm', WEZTERM_PANE: '3' })
+    const helper = world(on, { frames: 3 })
+    engineRow(on)
+    const seen = blits(on)
+    await mountRow($, gifRow)
+    await helper.clock.advance(300)
+
+    expect(helper.calls.some(([command]) => command === 'frames')).toBe(false)
+    expect(seen).toEqual([])
+  })
+
+  test('it stops when the element is gone', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on, { frames: 3 })
+    engineRow(on)
+    let count = 0
+    on('ui.blit', () => {
+      count += 1
+      return { value: { deny: 'not mounted' } }
+    })
+    await mountRow($, gifRow)
+    await helper.clock.advance(20000)
+    const after = count
+    await helper.clock.advance(20000)
+
+    // A few tries while the row may still be coming, then none.
+    expect(after).toBeGreaterThan(0)
+    expect(count).toBe(after)
+  })
+
+  test('a still picture plays nothing', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on)
+    engineRow(on)
+    const seen = blits(on)
+    await mountRow($, gifRow)
+    await helper.clock.advance(300)
+
+    expect(helper.calls.some(([command]) => command === 'frames')).toBe(false)
+    expect(seen).toEqual([])
   })
 })
 

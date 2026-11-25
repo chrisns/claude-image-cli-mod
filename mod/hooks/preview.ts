@@ -154,7 +154,7 @@ export function caption(head: InlineHead, found: Inspected | undefined): string 
     parts.push(`${found.width}\u00d7${found.height}`, found.format)
 
     if (found.frames > 1) {
-      parts.push(`frame 1 of ${found.frames}`)
+      parts.push(`${found.frames} frames`)
     }
 
     parts.push(formatBytes(found.bytes))

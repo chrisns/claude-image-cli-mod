@@ -12,6 +12,7 @@ export type Options = {
   mermaid: boolean
   diagramMaxRows: number
   mermaidTheme: 'default' | 'neutral' | 'dark' | 'forest'
+  models: boolean
 }
 
 export type Inspected = {
@@ -23,6 +24,10 @@ export type Inspected = {
   bytes: number
   /** The stored image under the name its sender gave, when it gave one. */
   named?: string
+  /** For the views of a 3D model: the model file, its triangles and its size. */
+  model?: string
+  triangles?: number
+  size?: number[]
 }
 
 /** An image that is ready to size and draw: how the sender asked for it, and where it is stored. */
@@ -185,6 +190,7 @@ export function readOptions(
       options.mermaid_theme === 'neutral' || options.mermaid_theme === 'dark' || options.mermaid_theme === 'forest'
         ? options.mermaid_theme
         : 'default',
+    models: options.models !== false,
   }
 }
 
@@ -288,6 +294,52 @@ export function deliveredImages(output: unknown): string[] {
     const image = isImage === true || (typeof media_type === 'string' && media_type.startsWith('image/'))
 
     return typeof path === 'string' && path !== '' && image ? [path] : []
+  })
+}
+
+/** The 3D model files that render.py's `model` command draws. */
+export const MODEL_EXTENSIONS = ['.stl', '.obj', '.3mf', '.ply']
+
+/** Whether a path names a 3D model file, by its extension. */
+export function isModelPath(path: string): boolean {
+  const lower = path.toLowerCase()
+
+  return MODEL_EXTENSIONS.some(extension => lower.endsWith(extension))
+}
+
+/** The 3D model files a tool delivered to the person (SendUserFile): drawn from four sides. */
+export function deliveredModels(output: unknown): string[] {
+  if (typeof output !== 'object' || output === null || !('attachments' in output)) {
+    return []
+  }
+
+  const { attachments } = output as { attachments: unknown }
+
+  if (!Array.isArray(attachments)) {
+    return []
+  }
+
+  return attachments.flatMap(attachment => {
+    const { path } = (attachment ?? {}) as Record<string, unknown>
+
+    return typeof path === 'string' && path !== '' && isModelPath(path) ? [path] : []
+  })
+}
+
+/** The base64 images in a tool result made of content blocks (an MCP tool's, this mod's own tool's). */
+export function contentImages(output: unknown): string[] {
+  const blocks = Array.isArray(output)
+    ? output
+    : typeof output === 'object' && output !== null && Array.isArray((output as { content?: unknown }).content)
+      ? (output as { content: unknown[] }).content
+      : []
+
+  return blocks.flatMap(block => {
+    const { type, data, source } = (block ?? {}) as Record<string, unknown>
+    // MCP's shape ({ data, mimeType }) or the API's ({ source: { type: 'base64', data } }).
+    const found = typeof data === 'string' ? data : (source as { data?: unknown } | undefined)?.data
+
+    return type === 'image' && typeof found === 'string' && found !== '' ? [found] : []
   })
 }
 

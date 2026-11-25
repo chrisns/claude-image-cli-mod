@@ -77,6 +77,16 @@ function world(on: any, helper: Partial<Helper> = {}): Helper {
       reply = { ...STORED, path: '/cache/diagram.png', named: '/cache/named/d/flowchart.png', kind: 'flowchart' }
     } else if (command === 'mermaid-check') {
       reply = { ok: true, mmdc: state.noMermaid ? null : '/usr/local/bin/mmdc', browser: null }
+    } else if (command === 'model') {
+      reply = {
+        ...STORED,
+        path: '/cache/views.png',
+        named: '/cache/named/v/part views.png',
+        model: rest[0],
+        triangles: 1108,
+        size: [45, 10, 6],
+        ...(rest.includes('--data') ? { data: PNG } : {}),
+      }
     } else if (command === 'inspect') {
       reply = STORED
     } else if (command === 'cell') {
@@ -353,6 +363,94 @@ describe('delivered files', () => {
       '--name',
       'photo.jpg',
     ])
+  })
+})
+
+describe('3D models', () => {
+  const MODEL_TOOL = 'mcp__inline-images__show_model'
+
+  test('show_model draws the model and hands Claude the picture too', async ($, on) => {
+    const helper = world(on)
+    const answer = await $.tool.call({ tool: MODEL_TOOL, path: '/work/part.stl' } as never)
+    const content = (answer as { result: { type: string; text?: string; data?: string }[] }).result
+
+    expect(helper.calls.find(([command]) => command === 'model')).toEqual(['model', '/work/part.stl', '--up', 'z', '--data'])
+    expect(content[0]?.text).toContain('part.stl from four sides')
+    expect(content[0]?.text).toContain('45 x 10 x 6 mm, 1,108 triangles')
+    // The API's own image block: an MCP-style one ({ data, mimeType }) does not reach the model.
+    expect(content[1]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } })
+  })
+
+  test('show_model passes on a Y-up model, and refuses a call without a path', async ($, on) => {
+    const helper = world(on)
+    await $.tool.call({ tool: MODEL_TOOL, path: 'scan.obj', up: 'y' } as never)
+    const refused = await $.tool.call({ tool: MODEL_TOOL } as never)
+
+    expect(helper.calls.find(([command]) => command === 'model')).toEqual(['model', 'scan.obj', '--up', 'y', '--data'])
+    // A refusal at tool.run reaches Claude as an error result.
+    expect(refused).toMatchObject({ isError: true })
+    expect((refused as { text?: string }).text).toContain('needs { path }')
+  })
+
+  test('a model that will not draw tells Claude why', async ($, on) => {
+    world(on, { fail: command => (command === 'model' ? 'part.stl: more than 8000000 triangles' : undefined) })
+    const refused = await $.tool.call({ tool: MODEL_TOOL, path: '/work/part.stl' } as never)
+
+    expect(refused).toMatchObject({ isError: true })
+    expect((refused as { text?: string }).text).toContain('more than 8000000 triangles')
+  })
+
+  test("show_model's row draws the picture from its result", async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on)
+    engineRow(on)
+    const props = {
+      tool_use_id: 'row-1',
+      tool: MODEL_TOOL,
+      isErrored: false,
+      output: [{ type: 'text', text: 'The person sees part.stl.' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG } }],
+    }
+    const ui = await mountRow($, props)
+
+    expect(await ui.find({ type: 'Raster' })).toBeDefined()
+    expect(helper.calls.find(([command]) => command === 'inspect')).toEqual(['inspect', '--name', 'model views.png'])
+    expect(helper.calls.some(([command]) => command === 'model')).toBe(false)
+  })
+
+  test('a model file that SendUserFile delivered is drawn from four sides', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on)
+    engineRow(on)
+    const props = {
+      tool_use_id: 'row-1',
+      tool: 'SendUserFile',
+      isErrored: false,
+      output: { attachments: [{ path: '/work/bracket.3mf', size: 900, isImage: false }] },
+    }
+    const ui = await mountRow($, props)
+    // The model is drawn from a timer, which outlives the render hook.
+    await helper.clock.advance(1)
+
+    expect(helper.calls.find(([command]) => command === 'model')).toEqual(['model', '/work/bracket.3mf'])
+    expect((await ui.find({ type: 'Link' }))?.text).toContain('bracket.3mf from four sides')
+    expect(await ui.find({ type: 'Raster' })).toBeDefined()
+  })
+
+  test('a delivered model that will not draw says why, once', async ($, on) => {
+    mock.env(on, { TERM_PROGRAM: 'Apple_Terminal' })
+    const helper = world(on, { fail: command => (command === 'model' ? 'bracket.3mf: the file holds no triangles' : undefined) })
+    engineRow(on)
+    const props = {
+      tool_use_id: 'row-1',
+      tool: 'SendUserFile',
+      isErrored: false,
+      output: { attachments: [{ path: '/work/bracket.3mf', size: 900, isImage: false }] },
+    }
+    const ui = await mountRow($, props)
+    await helper.clock.advance(1)
+
+    expect((await ui.find({ type: 'Text', text: /bracket\.3mf from four sides, no preview: .*no triangles/ })) !== undefined).toBe(true)
+    expect(helper.calls.filter(([command]) => command === 'model')).toHaveLength(1)
   })
 })
 

@@ -7,7 +7,7 @@
 
 inline-images is a mod for [Claude Code](https://claude.com/claude-code). Many command-line tools print images with the [iTerm2 inline images protocol](https://iterm2.com/documentation-images.html): `imgcat`, `it2cat`, `chafa -f iterm`, `timg -p iterm`, `wezterm imgcat`, matplotlib backends and more. Claude Code does not show these images. You see "Ran 1 shell command", and the model reads a wall of base64.
 
-This mod shows each image under the tool call that printed it. It also shows the images that Claude sends to you. And it draws the Mermaid diagrams that Claude writes, Wardley maps included.
+This mod shows each image under the tool call that printed it. It also shows the images that Claude sends to you. It draws the Mermaid diagrams that Claude writes, Wardley maps included. And it draws 3D models (STL, OBJ, 3MF and PLY) from four sides.
 
 | Without the mod | With the mod |
 |---|---|
@@ -70,6 +70,7 @@ In iTerm2 each picture comes in as a block preview, then the real image replaces
 - **Previews in the transcript.** Each image appears under the tool call that printed it, with its name, size and format.
 - **Real pixels.** iTerm2, WezTerm, kitty and Ghostty show the real image. Other terminals show a preview in coloured blocks.
 - **Images that Claude sends.** An image file that Claude delivers with `SendUserFile` or `SendUserMessage` appears under the delivery. [See it](#images-that-claude-sends).
+- **3D models.** Claude can show you an STL, OBJ, 3MF or PLY file from four sides, and it sees the same picture, so it can check the model it made. [See it](#3d-models).
 - **Diagrams.** Claude can draw Mermaid diagrams: flowcharts, sequence diagrams, ER diagrams, Gantt charts, mind maps, Wardley maps and more. Each one appears as a picture in Claude's reply. [See them](#diagrams).
 - **Click to open.** Click a picture to open it in your system's viewer, for example Preview on macOS.
 - **A clean context.** The model reads `[inline image: earth.jpg, 141.6 KB, data left out; the user sees a preview if their terminal can draw it]`, not 190,000 characters of base64.
@@ -108,6 +109,22 @@ Ask Claude to send you an image, and it shows under the delivery:
 
 ![Claude delivers earth.jpg with SendUserFile, and the photo appears under the delivery](docs/screenshots/deliver.gif)
 
+### 3D models
+
+Ask Claude to show you a model, or let it check one it has just made. The mod gives Claude a `show_model` tool, and the model appears under the call as one picture of four views:
+
+![A bracket drawn from the front, the right, the top and from an isometric angle, with its size and triangle count](docs/screenshots/model-views.png)
+
+- The front, right and top views have the same scale, so the part keeps its size from view to view. The fourth view is isometric, from the front right and above.
+- Faces further back are darker, and creases and outlines are drawn as lines, so steps and bosses show in the flat views.
+- Z is up, as in slicers, CAD and OpenSCAD. For a Y-up model (most OBJ exports, scans and sculpts), Claude passes `up: "y"`.
+- Claude gets the picture too, so it can see a wrong hole or a missing wall before you print.
+- A model file that Claude sends you with `SendUserFile` is drawn the same way.
+- The mod caches each picture. When the file changes, it draws the picture again.
+- A large mesh takes longer: about 3 seconds for 140,000 triangles, and 10 to 20 seconds for a scan of 2 million or a 3MF of several plates. The mod thins a mesh of more than 200,000 triangles first.
+
+3D models need Pillow and nothing else: the mod reads the files and draws the views itself.
+
 ## Terminals
 
 | Terminal | What you see | How |
@@ -142,6 +159,7 @@ Change the options in the config menu of Claude Code, or under `pluginConfigs` i
 | `mermaid` | `true` | Draw ```` ```mermaid ```` blocks in replies as pictures, and tell Claude that it can draw diagrams. |
 | `mermaid_theme` | `default` | The Mermaid theme: `default`, `neutral`, `dark` or `forest`. Diagrams are drawn on white. |
 | `diagram_max_rows` | `40` | The tallest that a diagram can be, from 1 to 255 rows. Diagrams carry small text, so they may be taller than images. |
+| `models` | `true` | Give Claude the `show_model` tool, and draw model files that Claude sends. |
 | `hide_from_model` | `true` | Replace the image data in the tool result with a short note. |
 | `python` | `python3` | The Python 3 that runs the helper and the iTerm2 overlay. |
 
@@ -153,7 +171,8 @@ Change the options in the config menu of Claude Code, or under `pluginConfigs` i
 4. The mod draws the box with the renderer that your terminal supports.
 5. A transparent click layer ([`mod/hooks/click.tsx`](mod/hooks/click.tsx)) lies over each picture. A click opens the picture.
 6. A `prompt.compose` hook adds a short guide to Claude's system prompt: a ```` ```mermaid ```` block becomes a picture, and this is the Wardley map syntax. `render.py mermaid` draws each block with `mmdc` and caches the picture by its source.
-7. A `session.append` hook removes the image data from what the model reads. The transcript keeps the whole output, so the preview comes back when you resume a session.
+7. When Claude calls `show_model`, `render.py model` draws the four views with [`mod/bin/model3d.py`](mod/bin/model3d.py). The tool returns the picture to Claude, and the row draws it like any other image.
+8. A `session.append` hook removes the image data from what the model reads. The transcript keeps the whole output, so the preview comes back when you resume a session.
 
 ### Real pixels in iTerm2
 
@@ -254,6 +273,7 @@ Any program, file or web page can control the output that the mod reads. So:
 - It removes control and format characters from file names before it shows them.
 - It scans untrusted text in linear time.
 - The iTerm2 overlay writes only base64 image data and cursor moves to the terminal.
+- `show_model` runs after Claude Code's permission check, like any other tool. It reads only `.stl`, `.obj`, `.3mf` and `.ply` files, with Python's own parsers: no converter or other program runs. It refuses a file of more than 512 MB, a 3MF that unpacks to more than 1 GB, and a model of more than 8 million triangles.
 
 To report a problem, read [SECURITY.md](SECURITY.md).
 

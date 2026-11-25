@@ -7,7 +7,9 @@ import { baseName, extract, hasImageSequence, parseArguments, type InlineHead } 
 import {
   caption,
   cellRuns,
+  contentImages,
   deliveredImages,
+  deliveredModels,
   drawsPixels,
   fileUrl,
   imageKey,
@@ -34,7 +36,11 @@ type TextSource = { text: string; saved?: string }
 type FileSource = { file: string }
 // Or a Mermaid diagram from one of Claude's replies.
 type MermaidSource = { mermaid: string }
-type Source = TextSource | FileSource | MermaidSource
+// Or a 3D model file a tool delivered: drawn from four sides.
+type ModelSource = { model: string }
+// Or a picture a tool returned as an image block (the show_model tool's).
+type DataSource = { data: string; name: string }
+type Source = TextSource | FileSource | MermaidSource | ModelSource | DataSource
 
 type Scanned = { images: (Inspected & { args: string })[] }
 
@@ -47,6 +53,17 @@ const SLOW_DRAW_MS = 800
 // render.py gives mmdc 90 seconds, and as long again for the SVG it reads
 // when the picture looks like Mermaid's error picture.
 const MERMAID_TIMEOUT_MS = 200000
+
+// The tool that draws a 3D model from four sides for Claude and the person.
+const MODEL_TOOL_NAME = 'show_model'
+const MODEL_TOOL = `mcp__inline-images__${MODEL_TOOL_NAME}`
+// A model of millions of triangles takes render.py tens of seconds.
+const MODEL_TIMEOUT_MS = 180000
+const MODEL_GUIDE =
+  'Draw a 3D model file (STL, OBJ, 3MF or PLY) from four sides (front, right, top and an isometric view) as one picture. ' +
+  'The person sees it in the terminal under this call, and you get the picture too: use it to check a model you made or changed, ' +
+  'and whenever the person would want to see one. `path`: the file, absolute or relative to the working directory. ' +
+  '`up`: the axis that points up, "z" (the default: slicers, CAD, OpenSCAD) or "y" (most OBJ and glTF exports, scans and sculpts).'
 
 // What the helper decoded, by image. The engine keeps a drawing per input, but
 // a resize or a reload draws again, so the work is kept here, bounded.
@@ -72,9 +89,16 @@ let canDrawMermaid = false
 const clickTargets = new Lru<string, string>(500)
 const clickKey = (requestId: string, element: string) => `${requestId}\u0000${element}`
 
-/** The sources of images in one tool result: delivered image files, and text with image sequences. */
-function sourcesOf(output: unknown): Source[] {
-  const files: Source[] = deliveredImages(output).map(file => ({ file }))
+/**
+ * The sources of images in one tool result: delivered image files and 3D models,
+ * text with image sequences, and the picture of the show_model tool.
+ */
+function sourcesOf(output: unknown, tool?: string): Source[] {
+  if (tool === MODEL_TOOL) {
+    return contentImages(output).map(data => ({ data, name: 'model views.png' }))
+  }
+
+  const files: Source[] = [...deliveredImages(output).map(file => ({ file })), ...deliveredModels(output).map(model => ({ model }))]
   const text = outputText(output)
 
   return text !== undefined && hasImageSequence(text) ? [...files, { text, saved: savedPath(output) }] : files
@@ -149,6 +173,36 @@ function drawDiagram($: EngineInterface, options: Options, source: string): Prom
   })
 }
 
+// Delivered models whose picture is ready, and why one would not draw: as for diagrams,
+// drawn in the background (a large model takes seconds) and tried once.
+const readyModels = new Lru<string, true>(200)
+const modelErrors = new Lru<string, string>(200)
+const startedModels = new Set<string>()
+
+/** A model's four views, drawn once; a model that failed fails again at once, with its reason. */
+function drawModel($: EngineInterface, options: Options, path: string, key: string): Promise<Inspected> {
+  const failed = modelErrors.get(key)
+
+  if (failed !== undefined) {
+    return Promise.reject(new Error(failed))
+  }
+
+  return remember(inspected, key, async () => {
+    try {
+      const ran = await $.process.run([options.python, options.helper, 'model', path], { timeoutMs: MODEL_TIMEOUT_MS })
+
+      return parseReply<Inspected>(ran.stdout, ran.stderr, ran.exitCode)
+    } catch (problem) {
+      // An abort (the session ending) says nothing about the model: tried again next time.
+      if (!/aborted/i.test(reasonOf(problem))) {
+        modelErrors.set(key, reasonOf(problem))
+      }
+
+      throw problem
+    }
+  })
+}
+
 /** The images of a saved output, read once until a picture of it fails. */
 function scanSaved($: EngineInterface, options: Options, saved: string): Promise<Scanned> {
   return remember(scans, saved, async () => {
@@ -179,8 +233,56 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
   }
 
   const found: Pic[] = []
+  // Models still being drawn: a line each, and the row is drawn again when they are ready.
+  const beingDrawn: string[] = []
 
   for (const source of sources) {
+    if ('model' in source) {
+      const path = source.model
+      const key = `model:${e.requestId}:${path}`
+
+      if (readyModels.get(key) === undefined) {
+        // From a timer: a process the render hook starts ends with the hook, and a
+        // large model takes longer than one draw. Started once per model.
+        if (!startedModels.has(key)) {
+          startedModels.add(key)
+          $.clock.after(0, () => {
+            void drawModel($, options, path, key)
+              .catch(() => undefined)
+              .finally(() => {
+                startedModels.delete(key)
+                readyModels.set(key, true)
+                $.ui.invalidate('ui.render')
+              })
+          })
+        }
+
+        beingDrawn.push(baseName(path))
+        continue
+      }
+
+      found.push({
+        key,
+        head: { name: path, width: { unit: 'auto' }, height: { unit: 'auto' }, isAspectPreserved: true, isInline: true },
+        title: `${baseName(path)} from four sides`,
+        inspect: () => drawModel($, options, path, key),
+        forget: () => inspected.delete(key),
+      })
+      continue
+    }
+
+    if ('data' in source) {
+      const key = imageKey(source.data)
+
+      found.push({
+        key,
+        head: { name: source.name, width: { unit: 'auto' }, height: { unit: 'auto' }, isAspectPreserved: true, isInline: true },
+        inspect: () => remember(inspected, key, () => run<Inspected>(['inspect', '--name', source.name], source.data)),
+        forget: () => inspected.delete(key),
+      })
+      continue
+    }
+
     if ('mermaid' in source) {
       const diagram = source.mermaid
       const key = diagramKey(options.mermaidTheme, diagram)
@@ -272,8 +374,15 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     }
   }
 
+  const { Box, Text, Raster, Image, Client, Link, Markdown } = $.ui.resolve(e)
+  const drawingNodes = beingDrawn.map((name, index) => (
+    <Box key={`inline-drawing-${index}`} paddingLeft={2}>
+      <Text dimColor>{`\u22ef drawing ${name} from four sides`}</Text>
+    </Box>
+  ))
+
   if (found.length === 0) {
-    return { nodes: [], shown: 0 }
+    return { nodes: drawingNodes, shown: 0 }
   }
 
   // One cell in pixels, as the terminal reports its size. Without it a cell is guessed.
@@ -300,7 +409,6 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     }) !== undefined
   const isPixelTerminal = drawsPixels(program, await $.env.get('TERM'), await $.env.get('KITTY_WINDOW_ID'))
   const isPixels = options.renderer === 'image' || (options.renderer === 'auto' && isPixelTerminal)
-  const { Box, Text, Raster, Image, Client, Link, Markdown } = $.ui.resolve(e)
   const label = (pic: Pic, stored: Inspected | undefined) =>
     pic.title === undefined ? caption(pic.head, stored) : stored === undefined ? pic.title : `${pic.title} \u00b7 ${stored.width}\u00d7${stored.height}`
 
@@ -417,7 +525,7 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
 
       return (
         <Box key={`inline-box-${index}`} paddingLeft={2}>
-          <Text dimColor>{`[inline image: ${caption(head, stored)}, no preview: ${reason}]`}</Text>
+          <Text dimColor>{`[${pic.title ?? `inline image: ${caption(head, stored)}`}, no preview: ${reason}]`}</Text>
         </Box>
       )
     }
@@ -451,6 +559,8 @@ async function previews($: EngineInterface, e: RenderInput, settings: Settings, 
     redrawn.set(drawing, true)
     $.clock.after(100, () => $.ui.invalidate('ui.render'))
   }
+
+  nodes.push(...drawingNodes)
 
   if (found.length > MAX_IMAGES) {
     nodes.push(
@@ -582,6 +692,26 @@ export const register: Register = (on, settings) => {
       }
     }
 
+    // The tool that draws a 3D model from four sides. Its own catch: a refusal (a
+    // session started with --tools "") must not stop the overlay below.
+    if (options.models) {
+      await $.tool
+        .register({
+          name: MODEL_TOOL_NAME,
+          description: MODEL_GUIDE,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              path: { type: 'string', description: 'The model file: STL, OBJ, 3MF or PLY.' },
+              up: { type: 'string', enum: ['z', 'y'], description: 'The axis that points up. Default "z".' },
+            },
+            required: ['path'],
+          },
+          isDeferred: false,
+        })
+        .catch(problem => $.ui.log(`inline-images: no show_model tool: ${reasonOf(problem)}`, { to: 'debug' }))
+    }
+
     const command = overlayCommand(options, {
       program: await $.env.get('TERM_PROGRAM'),
       itermSession: await $.env.get('ITERM_SESSION_ID'),
@@ -656,6 +786,47 @@ export const register: Register = (on, settings) => {
     return started
   })
 
+  // show_model: draw the model, and hand the picture to Claude as well as the person.
+  // At tool.run, behind the permission check: the path is the model's choice.
+  on('tool.run', { tool: MODEL_TOOL }, async ($, e) => {
+    const input = e as unknown as { path?: unknown; up?: unknown }
+
+    if (typeof input.path !== 'string' || input.path.trim() === '') {
+      return { deny: 'show_model needs { path }: the model file (STL, OBJ, 3MF or PLY).' }
+    }
+
+    const options = readOptions(settings, $.plugin.root)
+    const up = input.up === 'y' ? 'y' : 'z'
+
+    try {
+      const ran = await $.process.run([options.python, options.helper, 'model', input.path, '--up', up, '--data'], {
+        timeoutMs: MODEL_TIMEOUT_MS,
+      })
+      const drawn = parseReply<Inspected & { data: string }>(ran.stdout, ran.stderr, ran.exitCode)
+      const name = baseName(drawn.model ?? input.path)
+      const size = (drawn.size ?? []).map(value => Number(value.toFixed(2))).join(' x ')
+      const unit = /\.(stl|3mf)$/i.test(name) ? ' mm' : ''
+      const facts = [size === '' ? '' : `${size}${unit}`, drawn.triangles === undefined ? '' : `${drawn.triangles.toLocaleString('en-GB')} triangles`]
+        .filter(Boolean)
+        .join(', ')
+
+      // A plugin's own tool answers with a string or a list of content blocks.
+      return {
+        result: [
+            {
+              type: 'text',
+              text:
+                `The person sees ${name} from four sides (front, right and top at one scale, then isometric from the front right, above), ` +
+                `${up.toUpperCase()} up${facts === '' ? '' : `: ${facts}`}. The picture follows.`,
+            },
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: drawn.data } },
+        ],
+      }
+    } catch (problem) {
+      return { deny: `show_model could not draw ${input.path}: ${reasonOf(problem)}` }
+    }
+  })
+
   // What the model reads. The transcript keeps the whole output, so the preview
   // can be drawn again after a resume.
   on('session.append', { door: 'tool-result' }, ($, e, next) => {
@@ -690,7 +861,7 @@ export const register: Register = (on, settings) => {
   // A call drawn on its own row: the pictures go under its result. One hook for
   // every kind of source, so the click layers of one row never share a key.
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    const sources = e.props.isErrored ? [] : sourcesOf(e.props.output)
+    const sources = e.props.isErrored ? [] : sourcesOf(e.props.output, e.props.tool)
 
     if (sources.length === 0) {
       return next(e)
@@ -743,7 +914,7 @@ export const register: Register = (on, settings) => {
   // A run of calls folds into one line, which would hide the pictures. On the
   // terminal, unfold a group that holds one and draw the pictures under it.
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
-    const sources = e.surface !== 'terminal' ? [] : e.props.calls.flatMap(call => (call.isErrored ? [] : sourcesOf(call.output)))
+    const sources = e.surface !== 'terminal' ? [] : e.props.calls.flatMap(call => (call.isErrored ? [] : sourcesOf(call.output, call.tool)))
 
     if (sources.length === 0) {
       return next(e)

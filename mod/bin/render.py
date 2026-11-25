@@ -1489,8 +1489,9 @@ def command_model(arguments):
 
 
 def command_mermaid_check(arguments):
-    """What drawing a diagram would use: mmdc and a browser, or what is missing."""
-    print(json.dumps({"ok": True, "mmdc": shutil.which("mmdc"), "browser": find_browser()}))
+    """What drawing a diagram would use (mmdc and a browser), and whether Pillow is
+    there to draw 3D models: or what is missing."""
+    print(json.dumps({"ok": True, "mmdc": shutil.which("mmdc"), "browser": find_browser(), "pillow": HAVE_PILLOW}))
 
 
 def main():

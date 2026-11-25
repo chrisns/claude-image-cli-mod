@@ -118,6 +118,23 @@ class Reading(unittest.TestCase):
         # Scaled by two, then moved by (10, 20, 0).
         self.assertEqual(model3d.bounds(soup), ((10, 20, 0), (12, 22, 2)))
 
+    def test_a_mirrored_3mf_part_keeps_its_faces_outward(self):
+        mesh = "".join('<vertex x="%g" y="%g" z="%g"/>' % corner for triangle in box(0, 0, 0, 1, 1, 1) for corner in triangle)
+        triangles = "".join('<triangle v1="%d" v2="%d" v3="%d"/>' % (i, i + 1, i + 2) for i in range(0, 36, 3))
+        model = (
+            '<?xml version="1.0"?><model xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+            '<resources><object id="1" type="model"><mesh><vertices>%s</vertices><triangles>%s</triangles></mesh></object></resources>'
+            '<build><item objectid="1" transform="-1 0 0 0 1 0 0 0 1 0 0 0"/></build></model>'
+        ) % (mesh, triangles)
+        path = os.path.join(self.folder.name, "mirror.3mf")
+
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("3D/3dmodel.model", model)
+
+        soup = model3d.read_model(path)
+        self.assertEqual(model3d.bounds(soup), ((-1, 0, 0), (0, 1, 1)))
+        self.assertGreater(model3d.signed_volume(soup), 0)  # outward, as before the mirror
+
     def test_ascii_ply(self):
         text = (
             "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\nproperty float z\n"
@@ -163,26 +180,66 @@ class Drawing(unittest.TestCase):
         with Image.open(out) as picture:
             self.assertEqual(picture.size[0], 2 * 200 + 3)
 
-    def test_a_small_boss_on_a_big_plate_stays_in_front(self):
-        # Sorted as whole triangles, the plate's big top face would cover the boss.
-        model = os.path.join(self.folder.name, "plate.stl")
+    def iso_pixel(self, triangles, point, tile=240):
+        """The colour of the isometric view where `point` (a corner of the model) is drawn."""
+        model = os.path.join(self.folder.name, "m.stl")
 
         with open(model, "wb") as handle:
-            handle.write(binary_stl(box(0, 0, 0, 100, 100, 4) + box(45, 45, 4, 55, 55, 30)))
+            handle.write(binary_stl(triangles))
 
-        out = os.path.join(self.folder.name, "views.png")
+        out = os.path.join(self.folder.name, "m.png")
+        model3d.render_views(model, out, tile=tile)
+        # Where render_views puts it: the view's middle on the middle of the model's extent.
+        soup = model3d.read_model(model)
+        xs, ys, _ = model3d.project(soup, model3d.VIEWS[3][1])
+        scale = tile * (1 - 2 * model3d.MARGIN) / max(max(xs) - min(xs), max(ys) - min(ys))
+        (r0, r1, r2), (u0, u1, u2), _ = model3d.VIEWS[3][1]
+        x = r0 * point[0] + r1 * point[1] + r2 * point[2]
+        y = u0 * point[0] + u1 * point[1] + u2 * point[2]
+        column = 1 + tile + 1 + tile / 2 + (x - (max(xs) + min(xs)) / 2) * scale
+        row = 1 + tile + 1 + tile / 2 - (y - (max(ys) + min(ys)) / 2) * scale
+
+        with Image.open(out) as picture:
+            return picture.convert("RGB").getpixel((int(column), int(row)))
+
+    def test_a_boss_at_the_far_corner_of_a_plate_is_not_hidden_by_it(self):
+        # Seen from the front right, a boss at the back left corner is further away than
+        # the middle of the plate's big top face. Sorted as whole triangles, that face
+        # is drawn last and hides the boss; cut into small pieces, it does not.
+        plate = box(0, 0, 0, 100, 100, 4)
+        boss = box(2, 80, 4, 18, 96, 40)
+        # On the boss's front face, low down: the plate's top face lies right behind it.
+        on_boss = (10, 80, 12)
+
+        with_boss = self.iso_pixel(plate + boss, on_boss)
+        plate_only = self.iso_pixel(plate, on_boss)
+
+        # Not just different (the picture is resampled): a different face.
+        self.assertGreater(sum(abs(a - b) for a, b in zip(with_boss, plate_only)), 30)
+
+    def test_an_open_surface_is_drawn_from_both_sides(self):
+        # One square, its corners clockwise seen from above: it faces down.
+        square = [((0, 0, 0), (0, 10, 0), (10, 10, 0)), ((0, 0, 0), (10, 10, 0), (10, 0, 0))]
+        soup = [value for triangle in square for corner in triangle for value in corner]
+        self.assertFalse(model3d.closed_and_consistent(soup))
+
+        model = os.path.join(self.folder.name, "square.stl")
+
+        with open(model, "wb") as handle:
+            handle.write(binary_stl(square))
+
+        out = os.path.join(self.folder.name, "square.png")
         tile = 200
         model3d.render_views(model, out, tile=tile)
 
         with Image.open(out) as picture:
-            picture = picture.convert("RGB")
-            # The top view is the lower left tile: its middle is the boss's top face,
-            # nearer than the plate, so lighter in a flat view.
-            top_left = (1, tile + 2)
-            boss = picture.getpixel((top_left[0] + tile // 2, top_left[1] + tile // 2))
-            plate = picture.getpixel((top_left[0] + tile // 2, top_left[1] + tile // 2 + 40))
+            middle_of_top = picture.convert("RGB").getpixel((1 + tile // 2, tile + 2 + tile // 2))
 
-        self.assertGreater(sum(boss), sum(plate))
+        self.assertNotEqual(middle_of_top, model3d.TILE_BACKGROUND)
+
+    def test_a_closed_box_is_closed(self):
+        soup = [value for triangle in box(0, 0, 0, 1, 1, 1) for corner in triangle for value in corner]
+        self.assertTrue(model3d.closed_and_consistent(soup))
 
     def test_a_dense_mesh_is_thinned_before_drawing(self):
         triangles = []

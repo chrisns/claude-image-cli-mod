@@ -273,7 +273,7 @@ Any program, file or web page can control the output that the mod reads. So:
 - It removes control and format characters from file names before it shows them.
 - It scans untrusted text in linear time.
 - The iTerm2 overlay writes only base64 image data and cursor moves to the terminal.
-- `show_model` runs after Claude Code's permission check, like any other tool. It reads only `.stl`, `.obj`, `.3mf` and `.ply` files, with Python's own parsers: no converter or other program runs. It refuses a file of more than 512 MB, a 3MF that unpacks to more than 1 GB, and a model of more than 8 million triangles.
+- `show_model` runs after Claude Code's permission check, like any other tool. It reads only `.stl`, `.obj`, `.3mf` and `.ply` files, with Python's own parsers: no converter or other program runs. It refuses a file of more than 512 MB, a 3MF that unpacks to more than 1 GB, and a model of more than 5 million triangles.
 
 To report a problem, read [SECURITY.md](SECURITY.md).
 

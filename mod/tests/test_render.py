@@ -664,7 +664,7 @@ class MermaidTests(unittest.TestCase):
     def test_check_reports_what_it_found(self):
         code, reply = run("mermaid-check")
         self.assertEqual(code, 0)
-        self.assertEqual(set(reply), {"ok", "mmdc", "browser"})
+        self.assertEqual(set(reply), {"ok", "mmdc", "browser", "pillow"})
 
     @unittest.skipUnless(HAVE_MMDC, "mmdc and a browser are needed")
     def test_a_flowchart_draws_and_is_named_for_its_kind(self):

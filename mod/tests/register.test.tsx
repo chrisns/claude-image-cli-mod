@@ -28,6 +28,7 @@ type Helper = {
   opened: string[][]
   fail?: (command: string) => string | undefined
   noMermaid?: boolean
+  noPillow?: boolean
   /** Milliseconds a command takes, as the plugin's clock reads them. */
   slow?: (command: string) => number
   clock: ReturnType<typeof mock.clock>
@@ -76,7 +77,7 @@ function world(on: any, helper: Partial<Helper> = {}): Helper {
     if (command === 'mermaid') {
       reply = { ...STORED, path: '/cache/diagram.png', named: '/cache/named/d/flowchart.png', kind: 'flowchart' }
     } else if (command === 'mermaid-check') {
-      reply = { ok: true, mmdc: state.noMermaid ? null : '/usr/local/bin/mmdc', browser: null }
+      reply = { ok: true, mmdc: state.noMermaid ? null : '/usr/local/bin/mmdc', browser: null, pillow: !state.noPillow }
     } else if (command === 'model') {
       reply = {
         ...STORED,
@@ -398,6 +399,34 @@ describe('3D models', () => {
 
     expect(refused).toMatchObject({ isError: true })
     expect((refused as { text?: string }).text).toContain('more than 8000000 triangles')
+  })
+
+  test('the tool is offered only where Pillow can draw it', async ($, on) => {
+    const offered: string[] = []
+    on('tool.register', (_$: unknown, e: { name: string }) => {
+      offered.push(e.name)
+      return { value: { tool: `mcp__inline-images__${e.name}` } }
+    })
+    on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+    mock.env(on, {})
+    world(on, { noPillow: true })
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+    expect(offered).toEqual([])
+  })
+
+  test('and offered where it can', async ($, on) => {
+    const offered: string[] = []
+    on('tool.register', (_$: unknown, e: { name: string }) => {
+      offered.push(e.name)
+      return { value: { tool: `mcp__inline-images__${e.name}` } }
+    })
+    on('session.start', (_$: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
+    mock.env(on, {})
+    world(on)
+    await $.session.start({ cwd: '/tmp', surface: 'terminal', isInteractive: true })
+
+    expect(offered).toEqual(['show_model'])
   })
 
   test("show_model's row draws the picture from its result", async ($, on) => {

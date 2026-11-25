@@ -28,7 +28,7 @@ EXTENSIONS = (".stl", ".obj", ".3mf", ".ply")
 
 MAX_FILE_BYTES = 512 * 1024 * 1024  # on disk
 MAX_UNZIPPED_BYTES = 1024 * 1024 * 1024  # the XML of a 3MF, all parts together
-MAX_TRIANGLES = 8_000_000  # read
+MAX_TRIANGLES = 5_000_000  # read
 DRAW_TRIANGLES = 200_000  # above this, the mesh is thinned before drawing
 GRID = 700  # the first thinning grid: cells along the longest side of the model
 MIN_GRID = 80  # the coarsest it gets, for a dense scan
@@ -282,6 +282,11 @@ def read_3mf(path):
 
             if transform is not None:
                 m = transform
+
+                # A mirroring transform turns the part's corners clockwise: turn them back.
+                if m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]) < 0:
+                    triangles = [(a, c, b) for a, b, c in triangles]
+
                 vertices = [
                     (
                         x * m[0] + y * m[3] + z * m[6] + m[9],
@@ -493,6 +498,27 @@ def signed_volume(soup):
     return total / 6.0
 
 
+def closed_and_consistent(soup):
+    """Whether the mesh is closed and its corners all turn the same way: every edge is
+    used once in each direction. Only then are the faces turned away from the camera
+    surely behind others, and safe to skip."""
+    low, high = bounds(soup)
+    span = max(high[i] - low[i] for i in range(3)) or 1.0
+    grain = span * 1e-6
+    directed = {}
+
+    for i in range(0, len(soup), 9):
+        keys = [
+            (round(soup[j] / grain), round(soup[j + 1] / grain), round(soup[j + 2] / grain)) for j in (i, i + 3, i + 6)
+        ]
+
+        for p, q in ((keys[0], keys[1]), (keys[1], keys[2]), (keys[2], keys[0])):
+            edge = (p, q)
+            directed[edge] = directed.get(edge, 0) + 1
+
+    return all(count == 1 and directed.get((q, p)) == 1 for (p, q), count in directed.items())
+
+
 def feature_edges(soup, flip):
     """The edges worth a line: creases, open edges, and the pairs of faces that may make
     an outline. Each is (x1, y1, z1, x2, y2, z2, normal, other normal or None, crease)."""
@@ -590,7 +616,7 @@ def extent(points):
     return min(xs), max(xs), min(ys), max(ys)
 
 
-def draw_view(points, flip, scale, centre, size, rows, edges, depth_range, shade_depth):
+def draw_view(points, flip, scale, centre, size, rows, edges, depth_range, shade_depth, two_sided=False):
     """One view as an image `size` pixels square, drawn SCALE times larger."""
     xs, ys, ds = points
     near, far = depth_range
@@ -621,7 +647,12 @@ def draw_view(points, flip, scale, centre, size, rows, edges, depth_range, shade
             nx, ny, nz = -nx, -ny, -nz
 
         if nz <= 0:
-            continue
+            # An open or muddled mesh: this face may be all there is to see, so it is
+            # drawn, lit as if it faced the camera. Further back, it is drawn first.
+            if not two_sided:
+                continue
+
+            nx, ny, nz = -nx, -ny, -nz
 
         length = math.sqrt(nx * nx + ny * ny + nz * nz) or 1.0
         nx, ny, nz = nx / length, ny / length, nz / length
@@ -750,6 +781,8 @@ def render_views(path, out_path, up="z", tile=TILE):
 
     # A mesh turned inside out (corners clockwise): its normals point in.
     flip = signed_volume(soup) < 0
+    # Faces turned away are skipped only on a closed mesh whose corners agree.
+    two_sided = not closed_and_consistent(soup)
 
     projected = [(name, project(soup, rows)) for name, rows in VIEWS]
     # A thinned mesh (a scan, a sculpt) is bumpy at the grid's scale, and every bump
@@ -780,6 +813,7 @@ def render_views(path, out_path, up="z", tile=TILE):
             edges,
             (max(depths), min(depths)),
             index < 3,
+            two_sided,
         )
         ImageDraw.Draw(view).text((10, 8), name, fill=TEXT_DIM, font=label)
         sheet.paste(view, (1 + (index % 2) * (tile + 1), 1 + (index // 2) * (tile + 1)))

@@ -678,13 +678,17 @@ export const register: Register = (on, settings) => {
     const started = await next(e)
     const options = readOptions(settings, $.plugin.root)
 
-    if (options.mermaid) {
-      // A failed check only means no diagrams: it must not stop the overlay below.
-      const found = await $.process
-        .run([options.python, options.helper, 'mermaid-check'], { timeoutMs: 15000 })
-        .then(ran => parseReply<{ mmdc: string | null }>(ran.stdout, ran.stderr, ran.exitCode))
-        .catch(() => undefined)
+    // What this machine can draw: diagrams (mmdc), 3D models (Pillow). A failed check
+    // only means neither: it must not stop the overlay below.
+    const found =
+      options.mermaid || options.models
+        ? await $.process
+            .run([options.python, options.helper, 'mermaid-check'], { timeoutMs: 15000 })
+            .then(ran => parseReply<{ mmdc: string | null; pillow?: boolean }>(ran.stdout, ran.stderr, ran.exitCode))
+            .catch(() => undefined)
+        : undefined
 
+    if (options.mermaid) {
       canDrawMermaid = typeof found?.mmdc === 'string'
 
       if (!canDrawMermaid) {
@@ -694,7 +698,9 @@ export const register: Register = (on, settings) => {
 
     // The tool that draws a 3D model from four sides. Its own catch: a refusal (a
     // session started with --tools "") must not stop the overlay below.
-    if (options.models) {
+    if (options.models && found?.pillow !== true) {
+      $.ui.log('inline-images: no Pillow, so no show_model tool (python3 -m pip install Pillow)', { to: 'debug' })
+    } else if (options.models) {
       await $.tool
         .register({
           name: MODEL_TOOL_NAME,

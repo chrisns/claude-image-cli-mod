@@ -81,6 +81,7 @@ describe('options', () => {
       mermaid: true,
       diagramMaxRows: 40,
       mermaidTheme: 'default',
+      models: true,
     })
   })
 

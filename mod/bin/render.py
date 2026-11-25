@@ -17,6 +17,9 @@ image decoder. Each command prints one line of JSON on stdout:
             terminal reports on the tty of this process or of a parent.
   open      Open a stored image in the system's viewer (`open` on macOS,
             `xdg-open` elsewhere), for a click on its preview.
+  model     Draw a 3D model (STL, OBJ, 3MF, PLY) as one picture of four views
+            (bin/model3d.py), store it like `inspect` does, and report it with
+            the model's size and triangle count.
 
 `cells --marker` is for iTerm2. It hides an id in the first cells of the grid
 and keeps a PNG of the box. bin/iterm_overlay.py finds the id on the screen
@@ -1414,9 +1417,81 @@ def command_open(arguments):
     print(json.dumps({"ok": True}))
 
 
+MODEL_VERSION = "1"  # part of the cache key: a new drawing style draws models again
+
+
+def command_model(arguments):
+    """Draw a 3D model's four views, once per version of the file."""
+    if not HAVE_PILLOW:
+        fail("3D models need Pillow: python3 -m pip install Pillow")
+
+    import model3d  # only here: the other commands never need it
+
+    path = os.path.abspath(arguments.path)
+
+    try:
+        info = os.stat(path)
+    except OSError as problem:
+        fail("cannot read %s: %s" % (path, problem.strerror))
+
+    if not stat.S_ISREG(info.st_mode):
+        fail("%s is not a file" % path)
+
+    prune(cache_dir())
+    folder = secure_folder(os.path.join(cache_dir(), "models"))
+    # The file as it is now: a model saved again under the same name is drawn again.
+    key = hashlib.sha256(
+        "\0".join([os.path.realpath(path), str(info.st_mtime_ns), str(info.st_size), arguments.up, MODEL_VERSION]).encode()
+    ).hexdigest()[:24]
+    picture = os.path.join(folder, key + ".png")
+    facts_path = os.path.join(folder, key + ".json")
+    facts = None
+
+    with contextlib.suppress(OSError, ValueError):
+        with open(facts_path) as handle:
+            facts = json.load(handle)
+
+    if facts is None or not os.path.isfile(picture):
+        descriptor, temporary = tempfile.mkstemp(dir=folder, prefix="." + key + ".", suffix=".png")
+        os.close(descriptor)
+
+        try:
+            facts = model3d.render_views(path, temporary, up=arguments.up)
+            os.replace(temporary, picture)
+        except model3d.ModelError as problem:
+            fail("%s: %s" % (os.path.basename(path), problem))
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(temporary)
+
+        write_atomic(facts_path, json.dumps(facts).encode())
+
+    os.utime(picture)
+
+    with open(picture, "rb") as handle:
+        described = store_image(handle.read())
+
+    named = named_copy(described["path"], "%s views.png" % os.path.splitext(os.path.basename(path))[0])
+
+    if named is not None:
+        described["named"] = named
+
+    described["model"] = path
+    described["triangles"] = facts.get("triangles")
+    described["size"] = facts.get("size")
+
+    if arguments.data:
+        # For the model too: the show_model tool hands the picture to Claude.
+        with open(picture, "rb") as handle:
+            described["data"] = base64.b64encode(handle.read()).decode("ascii")
+
+    print(json.dumps(described))
+
+
 def command_mermaid_check(arguments):
-    """What drawing a diagram would use: mmdc and a browser, or what is missing."""
-    print(json.dumps({"ok": True, "mmdc": shutil.which("mmdc"), "browser": find_browser()}))
+    """What drawing a diagram would use (mmdc and a browser), and whether Pillow is
+    there to draw 3D models: or what is missing."""
+    print(json.dumps({"ok": True, "mmdc": shutil.which("mmdc"), "browser": find_browser(), "pillow": HAVE_PILLOW}))
 
 
 def main():
@@ -1456,6 +1531,12 @@ def main():
     opened = commands.add_parser("open", help="open a stored image in the system's viewer")
     opened.add_argument("path")
     opened.set_defaults(run=command_open)
+
+    model = commands.add_parser("model", help="draw a 3D model (STL, OBJ, 3MF, PLY) from four sides")
+    model.add_argument("path")
+    model.add_argument("--up", choices=("z", "y"), default="z", help="the model's up axis (z: slicers and CAD)")
+    model.add_argument("--data", action="store_true", help="also report the picture itself, as base64")
+    model.set_defaults(run=command_model)
 
     png = commands.add_parser("png")
     png.add_argument("path")

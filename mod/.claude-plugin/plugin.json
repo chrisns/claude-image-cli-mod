@@ -1,7 +1,7 @@
 {
   "name": "inline-images",
-  "version": "0.5.1",
-  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, and the Mermaid diagrams Claude draws (Wardley maps too), in the Claude Code transcript. Real pixels in iTerm2, WezTerm, kitty and Ghostty; coloured blocks everywhere else.",
+  "version": "0.6.0",
+  "description": "See the images that commands print with the iTerm2 inline images protocol (imgcat and friends), the images Claude sends you, the Mermaid diagrams Claude draws (Wardley maps too), and 3D models (STL, OBJ, 3MF, PLY) from four sides, in the Claude Code transcript. Real pixels in iTerm2, WezTerm, kitty and Ghostty; coloured blocks everywhere else.",
   "author": {
     "name": "Chris Nesbitt-Smith",
     "url": "https://github.com/chrisns"
@@ -10,6 +10,7 @@
   "repository": "https://github.com/chrisns/claude-image-cli-mod",
   "license": "MIT",
   "keywords": [
+    "3d-models",
     "diagrams",
     "ghostty",
     "images",
@@ -20,6 +21,7 @@
     "mermaid",
     "osc-1337",
     "preview",
+    "stl",
     "terminal",
     "wardley-maps"
   ],
@@ -90,6 +92,12 @@
       ],
       "default": "default",
       "description": "The Mermaid theme. Diagrams are drawn on white, which reads well on any terminal."
+    },
+    "models": {
+      "title": "Draw 3D models",
+      "type": "boolean",
+      "default": true,
+      "description": "Give Claude a show_model tool that draws an STL, OBJ, 3MF or PLY file from four sides (front, right, top, isometric) as one picture: you see it under the call, and Claude sees it too, to check its work. A model file Claude sends you is drawn the same way. Needs Pillow."
     }
   }
 }
